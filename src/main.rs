@@ -81,6 +81,8 @@ struct DockRecord {
     root: PathBuf,
     workspace_id: String,
     created_at_unix: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    archived_at_unix: Option<u64>,
     repositories: Vec<DockRepository>,
 }
 
@@ -112,6 +114,7 @@ struct DockOverview {
     workspace_id: String,
     status: String,
     open: bool,
+    archived: bool,
     agents: Vec<AgentOverview>,
     repositories: Vec<RepositoryOverview>,
 }
@@ -205,7 +208,8 @@ fn open_popup(entrypoint: &str) -> Result<()> {
 
 fn show_overview() -> Result<()> {
     let state_dir = required_directory("HERDR_PLUGIN_STATE_DIR")?;
-    let state = load_state(&state_dir.join("state.json"))?;
+    let state_path = state_dir.join("state.json");
+    let mut state = load_state(&state_path)?;
     if state.docks.is_empty() {
         return Err(message("no docks have been created yet"));
     }
@@ -265,7 +269,12 @@ fn show_overview() -> Result<()> {
         lines.truncate(height.saturating_sub(4));
         lines.extend([
             String::new(),
-            "↑/↓ select · Enter focus open workspace · R refresh · Esc close".into(),
+            if dock.archived {
+                "↑/↓ select · Enter focus open workspace · R refresh · Esc close".into()
+            } else {
+                "↑/↓ select · Enter focus open workspace · A archive/remove · R refresh · Esc close"
+                    .into()
+            },
         ]);
         ui.frame("Dock overview", &lines)?;
 
@@ -275,6 +284,29 @@ fn show_overview() -> Result<()> {
             KeyCode::Down => cursor = (cursor + 1).min(docks.len() - 1),
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 docks = collect_overview(&state.docks)?;
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') if !dock.archived => {
+                let workspace_id = dock.workspace_id.clone();
+                let open = dock.open;
+                if !confirm_archive(&mut ui, dock)? {
+                    continue;
+                }
+                let index = state
+                    .docks
+                    .iter()
+                    .position(|record| record.workspace_id == workspace_id)
+                    .ok_or_else(|| message("dock history record is missing"))?;
+                match archive_dock(&state.docks[index], open) {
+                    Ok(()) => {
+                        state.docks[index].archived_at_unix =
+                            Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
+                        save_state(&state_path, &state)?;
+                        docks = collect_overview(&state.docks)?;
+                    }
+                    Err(error) => {
+                        show_notice(&mut ui, "Dock not archived", &error.to_string())?;
+                    }
+                }
             }
             KeyCode::Enter if dock.open => {
                 herdr(&["workspace", "focus", &dock.workspace_id])?;
@@ -297,8 +329,13 @@ fn build_overview(
         .iter()
         .rev()
         .map(|record| {
-            let workspace = live.get(&record.workspace_id);
-            let status = if !record.root.exists() {
+            let archived = record.archived_at_unix.is_some();
+            let workspace = (!archived)
+                .then(|| live.get(&record.workspace_id))
+                .flatten();
+            let status = if archived {
+                "archived".into()
+            } else if !record.root.exists() {
                 "missing".into()
             } else {
                 workspace
@@ -309,7 +346,9 @@ fn build_overview(
                 .repositories
                 .iter()
                 .map(|repository| {
-                    let status = if !repository.worktree.exists() {
+                    let status = if archived {
+                        "archived".into()
+                    } else if !repository.worktree.exists() {
                         "missing".into()
                     } else {
                         match optional_git(&repository.worktree, ["status", "--porcelain"]) {
@@ -318,9 +357,15 @@ fn build_overview(
                             None => "unavailable".into(),
                         }
                     };
-                    let commit =
+                    let commit = if archived {
+                        optional_git(
+                            &repository.source,
+                            ["log", "-1", "--pretty=%h %s", record.branch.as_str()],
+                        )
+                    } else {
                         optional_git(&repository.worktree, ["log", "-1", "--pretty=%h %s"])
-                            .unwrap_or_else(|| "no commit".into());
+                    }
+                    .unwrap_or_else(|| "no commit".into());
                     RepositoryOverview {
                         name: repository.name.clone(),
                         status,
@@ -335,6 +380,7 @@ fn build_overview(
                 workspace_id: record.workspace_id.clone(),
                 status,
                 open: workspace.is_some(),
+                archived,
                 agents: workspace
                     .map(|workspace| workspace.agents.clone())
                     .unwrap_or_default(),
@@ -342,6 +388,94 @@ fn build_overview(
             }
         })
         .collect()
+}
+
+fn confirm_archive(ui: &mut Ui, dock: &DockOverview) -> Result<bool> {
+    ui.frame(
+        "Archive/remove dock",
+        &[
+            format!("Dock: {}", dock.name),
+            format!("Worktrees: {}", dock.repositories.len()),
+            String::new(),
+            "This closes the workspace and removes clean worktrees.".into(),
+            "Branches and the archived history record remain.".into(),
+            String::new(),
+            "Y archive/remove · any other key cancel".into(),
+        ],
+    )?;
+    Ok(matches!(
+        read_key()?.code,
+        KeyCode::Char('y') | KeyCode::Char('Y')
+    ))
+}
+
+fn show_notice(ui: &mut Ui, title: &str, text: &str) -> Result<()> {
+    ui.frame(title, &[text.into(), String::new(), "Press any key".into()])?;
+    read_key()?;
+    Ok(())
+}
+
+fn archive_dock(record: &DockRecord, close_workspace: bool) -> Result<()> {
+    if !record.root.is_dir() {
+        return Err(message(format!(
+            "dock root is missing: {}",
+            record.root.display()
+        )));
+    }
+
+    let mut allowed =
+        BTreeSet::from([record.root.join("AGENTS.md"), record.root.join("CLAUDE.md")]);
+    for repository in &record.repositories {
+        if repository.worktree.parent() != Some(record.root.as_path()) {
+            return Err(message(format!(
+                "worktree is outside the dock root: {}",
+                repository.worktree.display()
+            )));
+        }
+        if !repository.worktree.is_dir() {
+            return Err(message(format!(
+                "worktree is missing: {}",
+                repository.worktree.display()
+            )));
+        }
+        if !git(&repository.worktree, ["status", "--porcelain"])?.is_empty() {
+            return Err(message(format!(
+                "{} has uncommitted or untracked changes",
+                repository.name
+            )));
+        }
+        allowed.insert(repository.worktree.clone());
+    }
+    for entry in fs::read_dir(&record.root)? {
+        let path = entry?.path();
+        if !allowed.contains(&path) {
+            return Err(message(format!(
+                "dock root contains an unexpected file: {}",
+                path.display()
+            )));
+        }
+    }
+
+    if close_workspace {
+        herdr(&["workspace", "close", &record.workspace_id])?;
+    }
+    for repository in &record.repositories {
+        checked(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository.source)
+                .args(["worktree", "remove", "--"])
+                .arg(&repository.worktree),
+        )?;
+    }
+    for guide in ["AGENTS.md", "CLAUDE.md"] {
+        let path = record.root.join(guide);
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+    }
+    fs::remove_dir(&record.root)?;
+    Ok(())
 }
 
 fn live_workspaces() -> Result<BTreeMap<String, LiveWorkspace>> {
@@ -483,6 +617,7 @@ fn create_dock() -> Result<()> {
         root: root.clone(),
         workspace_id,
         created_at_unix: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+        archived_at_unix: None,
         repositories: plans
             .iter()
             .zip(&worktrees)
@@ -1171,13 +1306,14 @@ mod tests {
         );
 
         fs::write(worktrees[0].join("dirty.txt"), "changed")?;
-        let record = DockRecord {
+        let mut record = DockRecord {
             name: "OAuth login".into(),
             slug: "oauth_login".into(),
             branch: "agent/oauth_login".into(),
             root: root.clone(),
             workspace_id: "workspace-1".into(),
             created_at_unix: 1,
+            archived_at_unix: None,
             repositories: plans
                 .iter()
                 .zip(&worktrees)
@@ -1200,7 +1336,7 @@ mod tests {
                 }],
             },
         )]);
-        let overview = build_overview(&[record], &live);
+        let overview = build_overview(std::slice::from_ref(&record), &live);
         assert!(overview[0].open);
         assert_eq!(overview[0].status, "working");
         assert_eq!(overview[0].agents.len(), 1);
@@ -1211,6 +1347,35 @@ mod tests {
                 .filter(|repository| repository.status == "dirty")
                 .count(),
             1
+        );
+
+        let error = archive_dock(&record, false).expect_err("dirty worktree must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("uncommitted or untracked changes")
+        );
+        assert!(root.exists());
+
+        fs::remove_file(worktrees[0].join("dirty.txt"))?;
+        archive_dock(&record, false)?;
+        assert!(!root.exists());
+        for plan in &plans {
+            git(
+                &plan.repository.path,
+                ["rev-parse", "--verify", "refs/heads/agent/oauth_login"],
+            )?;
+        }
+
+        record.archived_at_unix = Some(2);
+        let overview = build_overview(&[record], &BTreeMap::new());
+        assert_eq!(overview[0].status, "archived");
+        assert!(overview[0].archived);
+        assert!(
+            overview[0]
+                .repositories
+                .iter()
+                .all(|repository| repository.status == "archived")
         );
 
         fs::remove_dir_all(temporary)?;

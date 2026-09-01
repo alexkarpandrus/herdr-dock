@@ -27,7 +27,7 @@ title = "Create dock"
 placement = "popup"
 width = "80%"
 height = "80%"
-command = ["target/release/herdr-dock", "create"]
+command = ["sh", "-c", 'exec "$HERDR_PLUGIN_ROOT/target/release/herdr-dock" create']
 
 [[panes]]
 id = "overview"
@@ -35,4 +35,4 @@ title = "Dock overview"
 placement = "popup"
 width = "80%"
 height = "80%"
-command = ["target/release/herdr-dock", "overview"]
+command = ["sh", "-c", 'exec "$HERDR_PLUGIN_ROOT/target/release/herdr-dock" overview']

@@ -14,15 +14,16 @@ The `herdr-dock.create` action opens a terminal popup that:
 6. writes `AGENTS.md` and `CLAUDE.md` in their shared root; and
 7. opens one Herdr tab per repository, plus a `shared` tab when multiple repositories are selected.
 
-The `herdr-dock.overview` action shows saved dock history with live Herdr workspace and agent states, dirty repository counts, and latest commit subjects. Select an open dock and press Enter to focus it.
+The `herdr-dock.overview` action shows saved dock history with live Herdr workspace and agent states, dirty repository counts, and latest commit subjects. Press Enter to focus an open dock. Press `A` to archive one: Herdr asks for confirmation, refuses dirty worktrees, closes the workspace, removes the worktrees, and retains branches plus the archived history record.
 
 ## Install for development
 
 ```sh
+cargo build --release
 herdr plugin link /path/to/herdr-dock
 ```
 
-Herdr runs `cargo build --release` while linking or installing the plugin.
+Local links use the existing build. GitHub installs run the manifest's `cargo build --release` command.
 
 ## Configure repositories
 
