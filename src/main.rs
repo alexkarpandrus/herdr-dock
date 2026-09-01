@@ -29,6 +29,7 @@ struct Config {
     branch_prefix: String,
     worktree_root: Option<PathBuf>,
     worktree_manager: WorktreeManager,
+    repository_search_roots: Vec<PathBuf>,
     repositories: Vec<RepositoryConfig>,
 }
 
@@ -38,6 +39,7 @@ impl Default for Config {
             branch_prefix: "agent".into(),
             worktree_root: None,
             worktree_manager: WorktreeManager::Git,
+            repository_search_roots: Vec::new(),
             repositories: Vec::new(),
         }
     }
@@ -70,6 +72,8 @@ struct State {
     docks: Vec<DockRecord>,
     #[serde(default)]
     presets: Vec<Preset>,
+    #[serde(default)]
+    recent_repositories: Vec<PathBuf>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -77,6 +81,8 @@ struct Preset {
     name: String,
     repositories: Vec<String>,
 }
+
+type RepositorySelection = (Vec<Repository>, Option<Preset>, Vec<PathBuf>);
 
 #[derive(Deserialize, Serialize)]
 struct DockRecord {
@@ -608,14 +614,15 @@ fn create_dock() -> Result<()> {
     let config_path = config_dir.join("config.toml");
     let state_path = state_dir.join("state.json");
     let config = load_config(&config_path)?;
-    let repositories = load_repositories(&config.repositories)?;
-    if repositories.is_empty() {
+    let mut state = load_state(&state_path)?;
+    let mut repositories = load_repositories(&config.repositories)?;
+    merge_recent_repositories(&mut repositories, &state.recent_repositories);
+    if repositories.is_empty() && config.repository_search_roots.is_empty() {
         return Err(message(format!(
-            "no repositories configured; add [[repositories]] entries to {}",
+            "no repositories configured; add [[repositories]] or repository_search_roots to {}",
             config_path.display()
         )));
     }
-    let mut state = load_state(&state_path)?;
     let worktree_root = config
         .worktree_root
         .as_deref()
@@ -631,7 +638,12 @@ fn create_dock() -> Result<()> {
         let Some(name) = prompt_name(&mut ui, &config.branch_prefix)? else {
             return Ok(());
         };
-        let Some((selected, preset)) = prompt_repositories(&mut ui, &repositories, &state.presets)?
+        let Some((selected, preset, recent)) = prompt_repositories(
+            &mut ui,
+            &repositories,
+            &state.presets,
+            &config.repository_search_roots,
+        )?
         else {
             return Ok(());
         };
@@ -653,10 +665,10 @@ fn create_dock() -> Result<()> {
                 base_ref,
             });
         }
-        (name, plans, preset)
+        (name, plans, preset, recent)
     };
 
-    let (name, plans, preset) = selection;
+    let (name, plans, preset, recent) = selection;
     let slug = slugify(&name);
     let branch = format!("{}/{}", config.branch_prefix, slug);
     check_branch_name(&branch)?;
@@ -670,6 +682,9 @@ fn create_dock() -> Result<()> {
         state
             .base_refs
             .insert(repository_key(&plan.repository.path), plan.base_ref.clone());
+    }
+    for repository in recent {
+        remember_repository(&mut state.recent_repositories, repository);
     }
     if let Some(preset) = preset {
         upsert_preset(&mut state.presets, preset);
@@ -732,47 +747,98 @@ fn prompt_repositories(
     ui: &mut Ui,
     repositories: &[Repository],
     presets: &[Preset],
-) -> Result<Option<(Vec<Repository>, Option<Preset>)>> {
+    search_roots: &[PathBuf],
+) -> Result<Option<RepositorySelection>> {
+    let mut repositories = repositories.to_vec();
     let mut cursor: usize = 0;
     let mut selected = vec![false; repositories.len()];
     let mut preset_name = None;
+    let mut recent = Vec::new();
+    let mut discovered = None;
     loop {
         let height = terminal::size()?.1.saturating_sub(8) as usize;
-        let visible = height.max(1).min(repositories.len());
+        let visible = height.max(1).min(repositories.len().max(1));
         let start = cursor.saturating_sub(visible.saturating_sub(1));
-        let mut lines = repositories[start..start + visible]
-            .iter()
-            .enumerate()
-            .map(|(offset, repository)| {
-                let index = start + offset;
-                format!(
-                    "{} [{}] {}  {}",
-                    if index == cursor { ">" } else { " " },
-                    if selected[index] { "x" } else { " " },
-                    repository.name,
-                    repository.path.display()
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut lines = if repositories.is_empty() {
+            vec!["No repositories yet. Press A to find one.".into()]
+        } else {
+            repositories[start..start + visible]
+                .iter()
+                .enumerate()
+                .map(|(offset, repository)| {
+                    let index = start + offset;
+                    format!(
+                        "{} [{}] {}  {}",
+                        if index == cursor { ">" } else { " " },
+                        if selected[index] { "x" } else { " " },
+                        repository.name,
+                        repository.path.display()
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
         if let Some(name) = &preset_name {
             lines.push(format!("Save as preset: {name}"));
         }
         lines.push(String::new());
-        lines.push(if presets.is_empty() {
-            "↑/↓ move · Space select · S save preset · Enter continue · Esc cancel".into()
-        } else {
-            "↑/↓ move · Space select · P load preset · S save preset · Enter continue · Esc cancel"
-                .into()
-        });
+        let mut help = "↑/↓ move · Space select".to_owned();
+        if !search_roots.is_empty() {
+            help.push_str(" · A find repository");
+        }
+        if !presets.is_empty() {
+            help.push_str(" · P load preset");
+        }
+        help.push_str(" · S save preset · Enter continue · Esc cancel");
+        lines.push(help);
         ui.frame("Create dock · repositories", &lines)?;
         match read_key()?.code {
             KeyCode::Esc => return Ok(None),
-            KeyCode::Up => cursor = cursor.saturating_sub(1),
-            KeyCode::Down => cursor = (cursor + 1).min(repositories.len() - 1),
-            KeyCode::Char(' ') => selected[cursor] = !selected[cursor],
+            KeyCode::Up if !repositories.is_empty() => cursor = cursor.saturating_sub(1),
+            KeyCode::Down if !repositories.is_empty() => {
+                cursor = (cursor + 1).min(repositories.len() - 1)
+            }
+            KeyCode::Char(' ') if !repositories.is_empty() => selected[cursor] = !selected[cursor],
+            KeyCode::Char('a') | KeyCode::Char('A') if !search_roots.is_empty() => {
+                if discovered.is_none() {
+                    ui.frame(
+                        "Create dock · find repository",
+                        &["Scanning configured roots…".into()],
+                    )?;
+                    discovered = Some(discover_repositories(search_roots)?);
+                }
+                let candidates = discovered.as_deref().unwrap_or_default();
+                if candidates.is_empty() {
+                    show_notice(ui, "No repositories found", "Check repository_search_roots")?;
+                } else if let Some(repository) = prompt_repository_search(ui, candidates)? {
+                    if let Some(index) = repositories
+                        .iter()
+                        .position(|existing| existing.path == repository.path)
+                    {
+                        cursor = index;
+                        selected[index] = true;
+                    } else if repositories
+                        .iter()
+                        .any(|existing| existing.name == repository.name)
+                    {
+                        show_notice(
+                            ui,
+                            "Repository name conflict",
+                            &format!(
+                                "{} is already used; configure an explicit name",
+                                repository.name
+                            ),
+                        )?;
+                    } else {
+                        recent.push(repository.path.clone());
+                        repositories.push(repository);
+                        selected.push(true);
+                        cursor = repositories.len() - 1;
+                    }
+                }
+            }
             KeyCode::Char('p') | KeyCode::Char('P') if !presets.is_empty() => {
                 if let Some(preset) = prompt_preset(ui, presets)? {
-                    selected = selection_for_preset(repositories, &preset);
+                    selected = selection_for_preset(&repositories, &preset);
                     preset_name = None;
                 }
             }
@@ -793,11 +859,109 @@ fn prompt_repositories(
                         .map(|repository| repository_key(&repository.path))
                         .collect(),
                 });
-                return Ok(Some((chosen, preset)));
+                return Ok(Some((chosen, preset, recent)));
             }
             _ => {}
         }
     }
+}
+
+fn prompt_repository_search(
+    ui: &mut Ui,
+    repositories: &[Repository],
+) -> Result<Option<Repository>> {
+    let mut query = String::new();
+    let mut cursor = 0;
+    loop {
+        let matches = ranked_repositories(&query, repositories);
+        cursor = cursor.min(matches.len().saturating_sub(1));
+        let height = terminal::size()?.1.saturating_sub(8) as usize;
+        let visible = height.max(1).min(matches.len().max(1));
+        let start = cursor.saturating_sub(visible.saturating_sub(1));
+        let mut lines = vec![format!("> {query}"), String::new()];
+        if matches.is_empty() {
+            lines.push("No matches.".into());
+        } else {
+            lines.extend(matches[start..start + visible].iter().enumerate().map(
+                |(offset, repository)| {
+                    format!(
+                        "{} {}  {}",
+                        if start + offset == cursor { ">" } else { " " },
+                        repository.name,
+                        repository.path.display()
+                    )
+                },
+            ));
+        }
+        lines.extend([
+            String::new(),
+            "Type to search · ↑/↓ move · Enter add · Esc back".into(),
+        ]);
+        ui.frame("Create dock · find repository", &lines)?;
+        match read_key()?.code {
+            KeyCode::Esc => return Ok(None),
+            KeyCode::Up => cursor = cursor.saturating_sub(1),
+            KeyCode::Down if !matches.is_empty() => cursor = (cursor + 1).min(matches.len() - 1),
+            KeyCode::Enter if !matches.is_empty() => return Ok(Some(matches[cursor].clone())),
+            KeyCode::Backspace => {
+                query.pop();
+                cursor = 0;
+            }
+            KeyCode::Char(character) => {
+                query.push(character);
+                cursor = 0;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn ranked_repositories<'a>(query: &str, repositories: &'a [Repository]) -> Vec<&'a Repository> {
+    let mut matches = repositories
+        .iter()
+        .filter_map(|repository| {
+            let score = fuzzy_score(query, &repository.name).or_else(|| {
+                fuzzy_score(query, &repository.path.to_string_lossy()).map(|score| score + 1_000)
+            })?;
+            Some((score, repository))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|(left_score, left), (right_score, right)| {
+        left_score
+            .cmp(right_score)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    matches
+        .into_iter()
+        .map(|(_, repository)| repository)
+        .collect()
+}
+
+fn fuzzy_score(query: &str, candidate: &str) -> Option<usize> {
+    let needle = query
+        .chars()
+        .flat_map(char::to_lowercase)
+        .collect::<Vec<_>>();
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let haystack = candidate
+        .chars()
+        .flat_map(char::to_lowercase)
+        .collect::<Vec<_>>();
+    let mut next = 0;
+    let mut previous = None;
+    let mut score = 0;
+    for character in needle {
+        let index = haystack[next..]
+            .iter()
+            .position(|candidate| *candidate == character)?
+            + next;
+        score += previous.map_or(index, |previous| index - previous - 1);
+        previous = Some(index);
+        next = index + 1;
+    }
+    Some(score)
 }
 
 fn prompt_preset(ui: &mut Ui, presets: &[Preset]) -> Result<Option<Preset>> {
@@ -935,6 +1099,7 @@ fn load_config(path: &Path) -> Result<Config> {
             r#"branch_prefix = "agent"
 # worktree_root = "~/worktrees"
 # worktree_manager = "worktrunk"
+# repository_search_roots = ["~/Src"]
 
 # Add one block per repository:
 # [[repositories]]
@@ -943,7 +1108,7 @@ fn load_config(path: &Path) -> Result<Config> {
 "#,
         )?;
         return Err(message(format!(
-            "created {}; add repositories and run the action again",
+            "created {}; add repositories or repository_search_roots and run the action again",
             path.display()
         )));
     }
@@ -964,32 +1129,111 @@ fn load_repositories(configured: &[RepositoryConfig]) -> Result<Vec<Repository>>
             RepositoryConfig::Path(path) => (None, path),
             RepositoryConfig::Named { name, path } => (name.as_deref(), path),
         };
-        let path = expand_home(configured_path)?.canonicalize()?;
-        let root = git(&path, ["rev-parse", "--show-toplevel"])?;
-        let root = PathBuf::from(root.trim()).canonicalize()?;
-        if !paths.insert(root.clone()) {
+        let repository = load_repository(configured_path, configured_name)?;
+        if !paths.insert(repository.path.clone()) {
             continue;
         }
-        let name = configured_name
-            .map(str::to_owned)
-            .or_else(|| {
-                root.file_name()
-                    .map(|value| value.to_string_lossy().into_owned())
-            })
-            .ok_or_else(|| message(format!("cannot name repository {}", root.display())))?;
-        if Path::new(&name)
-            .file_name()
-            .and_then(|value| value.to_str())
-            != Some(&name)
-            || matches!(name.as_str(), "." | "..")
-        {
-            return Err(message(format!("invalid repository name `{name}`")));
+        if !names.insert(repository.name.clone()) {
+            return Err(message(format!(
+                "repository name `{}` is not unique",
+                repository.name
+            )));
         }
-        if !names.insert(name.clone()) {
-            return Err(message(format!("repository name `{name}` is not unique")));
-        }
-        repositories.push(Repository { name, path: root });
+        repositories.push(repository);
     }
+    Ok(repositories)
+}
+
+fn load_repository(path: &Path, configured_name: Option<&str>) -> Result<Repository> {
+    let path = expand_home(path)?.canonicalize()?;
+    let root = git(&path, ["rev-parse", "--show-toplevel"])?;
+    let root = PathBuf::from(root.trim()).canonicalize()?;
+    let name = configured_name
+        .map(str::to_owned)
+        .or_else(|| {
+            root.file_name()
+                .map(|value| value.to_string_lossy().into_owned())
+        })
+        .ok_or_else(|| message(format!("cannot name repository {}", root.display())))?;
+    if Path::new(&name)
+        .file_name()
+        .and_then(|value| value.to_str())
+        != Some(&name)
+        || matches!(name.as_str(), "." | "..")
+    {
+        return Err(message(format!("invalid repository name `{name}`")));
+    }
+    Ok(Repository { name, path: root })
+}
+
+fn merge_recent_repositories(repositories: &mut Vec<Repository>, recent: &[PathBuf]) {
+    let mut paths = repositories
+        .iter()
+        .map(|repository| repository.path.clone())
+        .collect::<BTreeSet<_>>();
+    let mut names = repositories
+        .iter()
+        .map(|repository| repository.name.clone())
+        .collect::<BTreeSet<_>>();
+    for path in recent {
+        if let Ok(repository) = load_repository(path, None)
+            && paths.insert(repository.path.clone())
+            && names.insert(repository.name.clone())
+        {
+            repositories.push(repository);
+        }
+    }
+}
+
+fn remember_repository(recent: &mut Vec<PathBuf>, repository: PathBuf) {
+    recent.retain(|existing| existing != &repository);
+    recent.insert(0, repository);
+}
+
+fn discover_repositories(search_roots: &[PathBuf]) -> Result<Vec<Repository>> {
+    let mut stack = Vec::new();
+    for configured_root in search_roots {
+        let root = expand_home(configured_root)?
+            .canonicalize()
+            .map_err(|error| {
+                message(format!(
+                    "cannot search {}: {error}",
+                    configured_root.display()
+                ))
+            })?;
+        if !root.is_dir() {
+            return Err(message(format!(
+                "repository search root is not a directory: {}",
+                root.display()
+            )));
+        }
+        stack.push(root);
+    }
+
+    let mut repositories = Vec::new();
+    let mut paths = BTreeSet::new();
+    while let Some(directory) = stack.pop() {
+        if directory.join(".git").exists() {
+            if let Ok(repository) = load_repository(&directory, None)
+                && paths.insert(repository.path.clone())
+            {
+                repositories.push(repository);
+            }
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+                stack.push(entry.path());
+            }
+        }
+    }
+    repositories.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(repositories)
 }
 
@@ -1323,9 +1567,14 @@ mod tests {
 
         let old_state: State = serde_json::from_str(r#"{"base_refs":{},"docks":[]}"#)?;
         assert!(old_state.presets.is_empty());
+        assert!(old_state.recent_repositories.is_empty());
 
         let default_config: Config = toml::from_str("branch_prefix = 'agent'")?;
         assert_eq!(default_config.worktree_manager, WorktreeManager::Git);
+        assert!(default_config.repository_search_roots.is_empty());
+        let search_config: Config =
+            toml::from_str("repository_search_roots = ['~/Src', '~/Work']")?;
+        assert_eq!(search_config.repository_search_roots.len(), 2);
         let worktrunk_config: Config =
             toml::from_str("branch_prefix = 'agent'\nworktree_manager = 'worktrunk'")?;
         assert_eq!(
@@ -1337,6 +1586,41 @@ mod tests {
             r#"{"name":"x","slug":"x","branch":"agent/x","root":"/tmp/x","workspace_id":"x","created_at_unix":1,"repositories":[]}"#,
         )?;
         assert_eq!(old_record.worktree_manager, WorktreeManager::Git);
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_and_ranks_repositories() -> Result<()> {
+        let temporary = env::temp_dir().join(format!(
+            "herdr-dock-search-test-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        let api = temporary.join("services").join("application-api");
+        let web = temporary.join("clients").join("web-client");
+        fs::create_dir_all(&api)?;
+        fs::create_dir_all(&web)?;
+        checked(Command::new("git").arg("init").arg("--quiet").arg(&api))?;
+        checked(Command::new("git").arg("init").arg("--quiet").arg(&web))?;
+
+        let repositories = discover_repositories(std::slice::from_ref(&temporary))?;
+        assert_eq!(repositories.len(), 2);
+        assert_eq!(
+            ranked_repositories("wc", &repositories)[0].name,
+            "web-client"
+        );
+        assert!(ranked_repositories("missing", &repositories).is_empty());
+
+        let mut recent = vec![api.canonicalize()?];
+        remember_repository(&mut recent, web.canonicalize()?);
+        remember_repository(&mut recent, api.canonicalize()?);
+        assert_eq!(recent[0], api.canonicalize()?);
+        assert_eq!(recent.len(), 2);
+
+        let mut quick_list = Vec::new();
+        merge_recent_repositories(&mut quick_list, &recent);
+        assert_eq!(quick_list.len(), 2);
+        fs::remove_dir_all(temporary)?;
         Ok(())
     }
 

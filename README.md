@@ -16,21 +16,43 @@ The `herdr-dock.create` action opens a terminal popup that:
 
 The `herdr-dock.overview` action shows saved dock history with live Herdr workspace and agent states, dirty repository counts, and latest commit subjects. Press Enter to focus an open dock. Press `A` to archive one: Herdr asks for confirmation, refuses dirty worktrees, closes the workspace, removes the worktrees, and retains branches plus the archived history record.
 
-## Install for development
+## Install
+
+Requirements:
+
+- macOS or Linux;
+- [Herdr](https://herdr.dev) 0.7.0 or newer;
+- Git; and
+- Rust and Cargo to build the plugin.
+
+### Install from GitHub
 
 ```sh
-cargo build --release
-herdr plugin link /path/to/herdr-dock
+herdr plugin install alexkarpandrus/herdr-dock
+herdr plugin list
 ```
 
-Local links use the existing build. GitHub installs run the manifest's `cargo build --release` command.
+Herdr downloads the repository, runs `cargo build --release`, and enables the plugin.
+
+### Link a local checkout
+
+Use this option when developing the plugin:
+
+```sh
+git clone https://github.com/alexkarpandrus/herdr-dock.git
+cd herdr-dock
+cargo build --release
+herdr plugin link --enabled "$PWD"
+```
+
+The local link uses the existing binary. Run `cargo build --release` again after source changes.
 
 ## Configure repositories
 
-Invoke the action once to create the plugin's `config.toml`, or find its directory with:
+Open the plugin configuration file:
 
 ```sh
-herdr plugin config-dir herdr-dock
+${EDITOR:-vi} "$(herdr plugin config-dir herdr-dock)/config.toml"
 ```
 
 ```toml
@@ -39,6 +61,8 @@ branch_prefix = "agent"
 # worktree_root = "~/worktrees"
 # Plain Git is the default. Use Worktrunk for lifecycle hooks and setup.
 # worktree_manager = "worktrunk"
+# Press A in the repository picker to search Git repositories under these roots.
+repository_search_roots = ["~/Src"]
 
 [[repositories]]
 name = "api"
@@ -51,7 +75,15 @@ path = "~/src/web"
 
 The optional `name` becomes the worktree directory and tab label. Repository names must be unique.
 
+`repository_search_roots` enables fuzzy repository search. Press `A` in the repository picker, type part of a repository name or path, and press Enter to add it. Herdr Dock saves selected search results and includes them in the repository quick list next time.
+
 `worktree_manager = "worktrunk"` requires [`wt`](https://worktrunk.dev/) on the plugin's `PATH`. Herdr Dock overrides Worktrunk's path for each command so worktrees stay under the shared dock root. Worktrunk hooks remain enabled and can ask for approval. Each dock saves its manager, so later configuration changes do not change how that dock is archived.
+
+Run the create action after saving the configuration:
+
+```sh
+herdr plugin action invoke create --plugin herdr-dock
+```
 
 ## Bind a hotkey
 
