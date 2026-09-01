@@ -14,6 +14,8 @@ The `herdr-dock.create` action opens a terminal popup that:
 6. writes `AGENTS.md` and `CLAUDE.md` in their shared root; and
 7. opens one Herdr tab per repository, plus a `shared` tab when multiple repositories are selected.
 
+The `herdr-dock.overview` action shows saved dock history with live Herdr workspace and agent states, dirty repository counts, and latest commit subjects. Select an open dock and press Enter to focus it.
+
 ## Install for development
 
 ```sh
@@ -56,6 +58,12 @@ key = "prefix+d"
 type = "plugin_action"
 command = "herdr-dock.create"
 description = "create dock"
+
+[[keys.command]]
+key = "prefix+o"
+type = "plugin_action"
+command = "herdr-dock.overview"
+description = "show dock overview"
 ```
 
 Herdr plugin v1 requires users to declare plugin hotkeys in their Herdr configuration.

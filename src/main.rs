@@ -92,6 +92,36 @@ struct DockRepository {
     base_ref: String,
 }
 
+#[derive(Clone)]
+struct LiveWorkspace {
+    status: String,
+    agents: Vec<AgentOverview>,
+}
+
+#[derive(Clone)]
+struct AgentOverview {
+    name: String,
+    status: String,
+    cwd: String,
+}
+
+struct DockOverview {
+    name: String,
+    branch: String,
+    root: PathBuf,
+    workspace_id: String,
+    status: String,
+    open: bool,
+    agents: Vec<AgentOverview>,
+    repositories: Vec<RepositoryOverview>,
+}
+
+struct RepositoryOverview {
+    name: String,
+    status: String,
+    commit: String,
+}
+
 struct Ui {
     stdout: Stdout,
 }
@@ -145,13 +175,14 @@ fn main() {
 
 fn run() -> Result<()> {
     match env::args().nth(1).as_deref() {
-        Some("open") => open_popup(),
+        Some("open") => open_popup(env::args().nth(2).as_deref().unwrap_or("create")),
         Some("create") => create_dock(),
-        _ => Err(message("expected `open` or `create`")),
+        Some("overview") => show_overview(),
+        _ => Err(message("expected `open`, `create`, or `overview`")),
     }
 }
 
-fn open_popup() -> Result<()> {
+fn open_popup(entrypoint: &str) -> Result<()> {
     let herdr = env::var_os("HERDR_BIN_PATH").unwrap_or_else(|| "herdr".into());
     let status = Command::new(herdr)
         .args([
@@ -161,7 +192,7 @@ fn open_popup() -> Result<()> {
             "--plugin",
             "herdr-dock",
             "--entrypoint",
-            "create",
+            entrypoint,
         ])
         .stdin(Stdio::null())
         .status()?;
@@ -170,6 +201,207 @@ fn open_popup() -> Result<()> {
     } else {
         Err(message(format!("could not open popup: {status}")))
     }
+}
+
+fn show_overview() -> Result<()> {
+    let state_dir = required_directory("HERDR_PLUGIN_STATE_DIR")?;
+    let state = load_state(&state_dir.join("state.json"))?;
+    if state.docks.is_empty() {
+        return Err(message("no docks have been created yet"));
+    }
+
+    let mut docks = collect_overview(&state.docks)?;
+    let mut cursor: usize = 0;
+    let mut ui = Ui::start()?;
+    loop {
+        let height = terminal::size()?.1 as usize;
+        let visible = (height / 3).max(1).min(docks.len());
+        let start = cursor.saturating_sub(visible.saturating_sub(1));
+        let mut lines = docks[start..start + visible]
+            .iter()
+            .enumerate()
+            .map(|(offset, dock)| {
+                let dirty = dock
+                    .repositories
+                    .iter()
+                    .filter(|repository| repository.status == "dirty")
+                    .count();
+                format!(
+                    "{} {} [{}] · {} repos · {} dirty · {} agents",
+                    if start + offset == cursor { ">" } else { " " },
+                    dock.name,
+                    dock.status,
+                    dock.repositories.len(),
+                    dirty,
+                    dock.agents.len()
+                )
+            })
+            .collect::<Vec<_>>();
+        let dock = &docks[cursor];
+        lines.extend([
+            String::new(),
+            format!("Branch: {}", dock.branch),
+            format!("Root: {}", dock.root.display()),
+            String::new(),
+            "Agents".into(),
+        ]);
+        if dock.agents.is_empty() {
+            lines.push("  none".into());
+        } else {
+            lines.extend(
+                dock.agents
+                    .iter()
+                    .map(|agent| format!("  {} [{}] · {}", agent.name, agent.status, agent.cwd)),
+            );
+        }
+        lines.push(String::new());
+        lines.push("Repositories".into());
+        lines.extend(dock.repositories.iter().map(|repository| {
+            format!(
+                "  {} [{}] · {}",
+                repository.name, repository.status, repository.commit
+            )
+        }));
+        lines.truncate(height.saturating_sub(4));
+        lines.extend([
+            String::new(),
+            "↑/↓ select · Enter focus open workspace · R refresh · Esc close".into(),
+        ]);
+        ui.frame("Dock overview", &lines)?;
+
+        match read_key()?.code {
+            KeyCode::Esc => return Ok(()),
+            KeyCode::Up => cursor = cursor.saturating_sub(1),
+            KeyCode::Down => cursor = (cursor + 1).min(docks.len() - 1),
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                docks = collect_overview(&state.docks)?;
+            }
+            KeyCode::Enter if dock.open => {
+                herdr(&["workspace", "focus", &dock.workspace_id])?;
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_overview(records: &[DockRecord]) -> Result<Vec<DockOverview>> {
+    Ok(build_overview(records, &live_workspaces()?))
+}
+
+fn build_overview(
+    records: &[DockRecord],
+    live: &BTreeMap<String, LiveWorkspace>,
+) -> Vec<DockOverview> {
+    records
+        .iter()
+        .rev()
+        .map(|record| {
+            let workspace = live.get(&record.workspace_id);
+            let status = if !record.root.exists() {
+                "missing".into()
+            } else {
+                workspace
+                    .map(|workspace| workspace.status.clone())
+                    .unwrap_or_else(|| "closed".into())
+            };
+            let repositories = record
+                .repositories
+                .iter()
+                .map(|repository| {
+                    let status = if !repository.worktree.exists() {
+                        "missing".into()
+                    } else {
+                        match optional_git(&repository.worktree, ["status", "--porcelain"]) {
+                            Some(output) if output.is_empty() => "clean".into(),
+                            Some(_) => "dirty".into(),
+                            None => "unavailable".into(),
+                        }
+                    };
+                    let commit =
+                        optional_git(&repository.worktree, ["log", "-1", "--pretty=%h %s"])
+                            .unwrap_or_else(|| "no commit".into());
+                    RepositoryOverview {
+                        name: repository.name.clone(),
+                        status,
+                        commit,
+                    }
+                })
+                .collect();
+            DockOverview {
+                name: record.name.clone(),
+                branch: record.branch.clone(),
+                root: record.root.clone(),
+                workspace_id: record.workspace_id.clone(),
+                status,
+                open: workspace.is_some(),
+                agents: workspace
+                    .map(|workspace| workspace.agents.clone())
+                    .unwrap_or_default(),
+                repositories,
+            }
+        })
+        .collect()
+}
+
+fn live_workspaces() -> Result<BTreeMap<String, LiveWorkspace>> {
+    let workspace_response = herdr_json(&["workspace", "list"])?;
+    let mut workspaces = BTreeMap::new();
+    if let Some(items) = workspace_response
+        .pointer("/result/workspaces")
+        .and_then(Value::as_array)
+    {
+        for workspace in items {
+            if let Some(workspace_id) = workspace.get("workspace_id").and_then(Value::as_str) {
+                workspaces.insert(
+                    workspace_id.into(),
+                    LiveWorkspace {
+                        status: workspace
+                            .get("agent_status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
+                            .into(),
+                        agents: Vec::new(),
+                    },
+                );
+            }
+        }
+    }
+
+    let agent_response = herdr_json(&["agent", "list"])?;
+    if let Some(items) = agent_response
+        .pointer("/result/agents")
+        .and_then(Value::as_array)
+    {
+        for agent in items {
+            let Some(workspace_id) = agent.get("workspace_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(workspace) = workspaces.get_mut(workspace_id) else {
+                continue;
+            };
+            workspace.agents.push(AgentOverview {
+                name: agent
+                    .get("agent")
+                    .and_then(Value::as_str)
+                    .or_else(|| agent.get("pane_id").and_then(Value::as_str))
+                    .unwrap_or("agent")
+                    .into(),
+                status: agent
+                    .get("agent_status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .into(),
+                cwd: agent
+                    .get("foreground_cwd")
+                    .and_then(Value::as_str)
+                    .or_else(|| agent.get("cwd").and_then(Value::as_str))
+                    .unwrap_or("")
+                    .into(),
+            });
+        }
+    }
+    Ok(workspaces)
 }
 
 fn create_dock() -> Result<()> {
@@ -936,6 +1168,49 @@ mod tests {
         assert_eq!(
             fs::read(root.join("AGENTS.md"))?,
             fs::read(root.join("CLAUDE.md"))?
+        );
+
+        fs::write(worktrees[0].join("dirty.txt"), "changed")?;
+        let record = DockRecord {
+            name: "OAuth login".into(),
+            slug: "oauth_login".into(),
+            branch: "agent/oauth_login".into(),
+            root: root.clone(),
+            workspace_id: "workspace-1".into(),
+            created_at_unix: 1,
+            repositories: plans
+                .iter()
+                .zip(&worktrees)
+                .map(|(plan, worktree)| DockRepository {
+                    name: plan.repository.name.clone(),
+                    source: plan.repository.path.clone(),
+                    worktree: worktree.clone(),
+                    base_ref: plan.base_ref.clone(),
+                })
+                .collect(),
+        };
+        let live = BTreeMap::from([(
+            "workspace-1".into(),
+            LiveWorkspace {
+                status: "working".into(),
+                agents: vec![AgentOverview {
+                    name: "shared".into(),
+                    status: "working".into(),
+                    cwd: root.to_string_lossy().into(),
+                }],
+            },
+        )]);
+        let overview = build_overview(&[record], &live);
+        assert!(overview[0].open);
+        assert_eq!(overview[0].status, "working");
+        assert_eq!(overview[0].agents.len(), 1);
+        assert_eq!(
+            overview[0]
+                .repositories
+                .iter()
+                .filter(|repository| repository.status == "dirty")
+                .count(),
+            1
         );
 
         fs::remove_dir_all(temporary)?;

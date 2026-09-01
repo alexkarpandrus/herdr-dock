@@ -13,7 +13,13 @@ platforms = ["linux", "macos"]
 id = "create"
 title = "Create dock"
 contexts = ["global"]
-command = ["target/release/herdr-dock", "open"]
+command = ["target/release/herdr-dock", "open", "create"]
+
+[[actions]]
+id = "overview"
+title = "Dock overview"
+contexts = ["global"]
+command = ["target/release/herdr-dock", "open", "overview"]
 
 [[panes]]
 id = "create"
@@ -22,3 +28,11 @@ placement = "popup"
 width = "80%"
 height = "80%"
 command = ["target/release/herdr-dock", "create"]
+
+[[panes]]
+id = "overview"
+title = "Dock overview"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["target/release/herdr-dock", "overview"]
