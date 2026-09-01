@@ -37,6 +37,8 @@ herdr plugin config-dir herdr-dock
 branch_prefix = "agent"
 # By default, worktrees live under HERDR_PLUGIN_STATE_DIR/workspaces.
 # worktree_root = "~/worktrees"
+# Plain Git is the default. Use Worktrunk for lifecycle hooks and setup.
+# worktree_manager = "worktrunk"
 
 [[repositories]]
 name = "api"
@@ -48,6 +50,8 @@ path = "~/src/web"
 ```
 
 The optional `name` becomes the worktree directory and tab label. Repository names must be unique.
+
+`worktree_manager = "worktrunk"` requires [`wt`](https://worktrunk.dev/) on the plugin's `PATH`. Herdr Dock overrides Worktrunk's path for each command so worktrees stay under the shared dock root. Worktrunk hooks remain enabled and can ask for approval. Each dock saves its manager, so later configuration changes do not change how that dock is archived.
 
 ## Bind a hotkey
 
@@ -73,6 +77,7 @@ Herdr plugin v1 requires users to declare plugin hotkeys in their Herdr configur
 
 ```sh
 cargo test
+HERDR_DOCK_TEST_WORKTRUNK=1 cargo test real_worktrunk_lifecycle_when_enabled -- --nocapture
 cargo clippy --all-targets -- -D warnings
 ```
 

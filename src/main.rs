@@ -1,3 +1,5 @@
+mod worktrees;
+
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -17,6 +19,7 @@ use std::{
     process::{Command, Output, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
+use worktrees::WorktreeManager;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -25,6 +28,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 struct Config {
     branch_prefix: String,
     worktree_root: Option<PathBuf>,
+    worktree_manager: WorktreeManager,
     repositories: Vec<RepositoryConfig>,
 }
 
@@ -33,6 +37,7 @@ impl Default for Config {
         Self {
             branch_prefix: "agent".into(),
             worktree_root: None,
+            worktree_manager: WorktreeManager::Git,
             repositories: Vec::new(),
         }
     }
@@ -83,6 +88,8 @@ struct DockRecord {
     created_at_unix: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     archived_at_unix: Option<u64>,
+    #[serde(default)]
+    worktree_manager: WorktreeManager,
     repositories: Vec<DockRepository>,
 }
 
@@ -296,13 +303,19 @@ fn show_overview() -> Result<()> {
                     .iter()
                     .position(|record| record.workspace_id == workspace_id)
                     .ok_or_else(|| message("dock history record is missing"))?;
-                match archive_dock(&state.docks[index], open) {
-                    Ok(()) => {
-                        state.docks[index].archived_at_unix =
-                            Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
-                        save_state(&state_path, &state)?;
-                        docks = collect_overview(&state.docks)?;
+                let archived_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+                drop(ui);
+                let mut archive_result = archive_dock(&state.docks[index], open);
+                if archive_result.is_ok() {
+                    state.docks[index].archived_at_unix = Some(archived_at);
+                    if let Err(error) = save_state(&state_path, &state) {
+                        state.docks[index].archived_at_unix = None;
+                        archive_result = Err(error);
                     }
+                }
+                ui = Ui::start()?;
+                match archive_result {
+                    Ok(()) => docks = collect_overview(&state.docks)?,
                     Err(error) => {
                         show_notice(&mut ui, "Dock not archived", &error.to_string())?;
                     }
@@ -416,13 +429,15 @@ fn show_notice(ui: &mut Ui, title: &str, text: &str) -> Result<()> {
 }
 
 fn archive_dock(record: &DockRecord, close_workspace: bool) -> Result<()> {
-    if !record.root.is_dir() {
+    let root_exists = record.root.exists();
+    if root_exists && !record.root.is_dir() {
         return Err(message(format!(
-            "dock root is missing: {}",
+            "dock root is not a directory: {}",
             record.root.display()
         )));
     }
 
+    let mut has_worktrees = false;
     let mut allowed =
         BTreeSet::from([record.root.join("AGENTS.md"), record.root.join("CLAUDE.md")]);
     for repository in &record.repositories {
@@ -432,9 +447,28 @@ fn archive_dock(record: &DockRecord, close_workspace: bool) -> Result<()> {
                 repository.worktree.display()
             )));
         }
+        allowed.insert(repository.worktree.clone());
+        if !repository.worktree.exists() {
+            if let Some(registered) =
+                registered_worktree(&repository.source, &repository.worktree, &record.branch)?
+            {
+                if registered == repository.worktree {
+                    return Err(message(format!(
+                        "worktree is missing but still registered: {}",
+                        repository.worktree.display()
+                    )));
+                }
+                return Err(message(format!(
+                    "branch {} is checked out at {}",
+                    record.branch,
+                    registered.display()
+                )));
+            }
+            continue;
+        }
         if !repository.worktree.is_dir() {
             return Err(message(format!(
-                "worktree is missing: {}",
+                "worktree is not a directory: {}",
                 repository.worktree.display()
             )));
         }
@@ -444,38 +478,68 @@ fn archive_dock(record: &DockRecord, close_workspace: bool) -> Result<()> {
                 repository.name
             )));
         }
-        allowed.insert(repository.worktree.clone());
+        has_worktrees = true;
     }
-    for entry in fs::read_dir(&record.root)? {
-        let path = entry?.path();
-        if !allowed.contains(&path) {
-            return Err(message(format!(
-                "dock root contains an unexpected file: {}",
-                path.display()
-            )));
+    if root_exists {
+        for entry in fs::read_dir(&record.root)? {
+            let path = entry?.path();
+            if !allowed.contains(&path) {
+                return Err(message(format!(
+                    "dock root contains an unexpected file: {}",
+                    path.display()
+                )));
+            }
         }
+    }
+    if has_worktrees {
+        record.worktree_manager.ensure_available()?;
     }
 
     if close_workspace {
         herdr(&["workspace", "close", &record.workspace_id])?;
     }
     for repository in &record.repositories {
-        checked(
-            Command::new("git")
-                .arg("-C")
-                .arg(&repository.source)
-                .args(["worktree", "remove", "--"])
-                .arg(&repository.worktree),
-        )?;
-    }
-    for guide in ["AGENTS.md", "CLAUDE.md"] {
-        let path = record.root.join(guide);
-        if path.exists() {
-            fs::remove_file(path)?;
+        if repository.worktree.is_dir() {
+            record
+                .worktree_manager
+                .remove(&repository.source, &repository.worktree)?;
         }
     }
-    fs::remove_dir(&record.root)?;
+    if root_exists {
+        for guide in ["AGENTS.md", "CLAUDE.md"] {
+            let path = record.root.join(guide);
+            if path.exists() {
+                fs::remove_file(path)?;
+            }
+        }
+        fs::remove_dir(&record.root)?;
+    }
     Ok(())
+}
+
+fn registered_worktree(source: &Path, worktree: &Path, branch: &str) -> Result<Option<PathBuf>> {
+    let list = checked(Command::new("git").arg("-C").arg(source).args([
+        "worktree",
+        "list",
+        "--porcelain",
+        "-z",
+    ]))?;
+    let branch_ref = format!("branch refs/heads/{branch}");
+    let mut current = None;
+    for field in list.split('\0') {
+        if let Some(path) = field.strip_prefix("worktree ") {
+            let path = PathBuf::from(path);
+            if path == worktree {
+                return Ok(Some(path));
+            }
+            current = Some(path);
+        } else if field == branch_ref {
+            return Ok(current);
+        } else if field.is_empty() {
+            current = None;
+        }
+    }
+    Ok(None)
 }
 
 fn live_workspaces() -> Result<BTreeMap<String, LiveWorkspace>> {
@@ -599,7 +663,7 @@ fn create_dock() -> Result<()> {
     let root = worktree_root.join(&slug);
 
     println!("Creating {branch} in {}...", root.display());
-    let worktrees = materialize_worktrees(&root, &name, &branch, &plans)?;
+    let worktrees = materialize_worktrees(config.worktree_manager, &root, &name, &branch, &plans)?;
     let workspace_id = open_workspace(&name, &root, &plans, &worktrees)?;
 
     for plan in &plans {
@@ -618,6 +682,7 @@ fn create_dock() -> Result<()> {
         workspace_id,
         created_at_unix: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         archived_at_unix: None,
+        worktree_manager: config.worktree_manager,
         repositories: plans
             .iter()
             .zip(&worktrees)
@@ -869,6 +934,7 @@ fn load_config(path: &Path) -> Result<Config> {
             path,
             r#"branch_prefix = "agent"
 # worktree_root = "~/worktrees"
+# worktree_manager = "worktrunk"
 
 # Add one block per repository:
 # [[repositories]]
@@ -1014,6 +1080,7 @@ fn default_base_ref(repository: &Path, refs: &[String]) -> Option<String> {
 }
 
 fn materialize_worktrees(
+    manager: WorktreeManager,
     root: &Path,
     name: &str,
     branch: &str,
@@ -1025,6 +1092,7 @@ fn materialize_worktrees(
             root.display()
         )));
     }
+    manager.ensure_available()?;
     if let Some(parent) = root.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1033,43 +1101,51 @@ fn materialize_worktrees(
     let result = (|| {
         for plan in plans {
             let destination = root.join(&plan.repository.name);
-            let exists = Command::new("git")
+            let branch_exists = Command::new("git")
                 .arg("-C")
                 .arg(&plan.repository.path)
                 .args(["show-ref", "--verify", "--quiet"])
                 .arg(format!("refs/heads/{branch}"))
                 .status()?
                 .success();
-            let mut command = Command::new("git");
-            command
-                .arg("-C")
-                .arg(&plan.repository.path)
-                .args(["worktree", "add"]);
-            if exists {
-                command.arg(&destination).arg(branch);
-            } else {
-                command
-                    .args(["-b", branch])
-                    .arg(&destination)
-                    .arg(&plan.base_ref);
+            if let Err(error) = manager.create(
+                &plan.repository.path,
+                &destination,
+                branch,
+                &plan.base_ref,
+                branch_exists,
+            ) {
+                if destination.exists() {
+                    created.push((plan.repository.path.clone(), destination));
+                }
+                return Err(error);
             }
-            checked(&mut command)?;
             created.push((plan.repository.path.clone(), destination));
         }
         write_agent_guides(root, name, branch, plans)?;
         Ok(())
     })();
     if let Err(error) = result {
+        let mut cleanup_errors = Vec::new();
         for (repository, worktree) in created.iter().rev() {
-            let _ = Command::new("git")
-                .arg("-C")
-                .arg(repository)
-                .args(["worktree", "remove", "--force"])
-                .arg(worktree)
-                .status();
+            if let Err(cleanup_error) = manager.remove(repository, worktree) {
+                cleanup_errors.push(cleanup_error.to_string());
+            }
         }
-        let _ = fs::remove_dir_all(root);
-        return Err(error);
+        if cleanup_errors.is_empty() {
+            for guide in ["AGENTS.md", "CLAUDE.md"] {
+                let path = root.join(guide);
+                if path.exists() {
+                    fs::remove_file(path)?;
+                }
+            }
+            fs::remove_dir(root)?;
+            return Err(error);
+        }
+        return Err(message(format!(
+            "{error}; cleanup incomplete: {}",
+            cleanup_errors.join("; ")
+        )));
     }
     Ok(created.into_iter().map(|(_, path)| path).collect())
 }
@@ -1247,6 +1323,20 @@ mod tests {
 
         let old_state: State = serde_json::from_str(r#"{"base_refs":{},"docks":[]}"#)?;
         assert!(old_state.presets.is_empty());
+
+        let default_config: Config = toml::from_str("branch_prefix = 'agent'")?;
+        assert_eq!(default_config.worktree_manager, WorktreeManager::Git);
+        let worktrunk_config: Config =
+            toml::from_str("branch_prefix = 'agent'\nworktree_manager = 'worktrunk'")?;
+        assert_eq!(
+            worktrunk_config.worktree_manager,
+            WorktreeManager::Worktrunk
+        );
+
+        let old_record: DockRecord = serde_json::from_str(
+            r#"{"name":"x","slug":"x","branch":"agent/x","root":"/tmp/x","workspace_id":"x","created_at_unix":1,"repositories":[]}"#,
+        )?;
+        assert_eq!(old_record.worktree_manager, WorktreeManager::Git);
         Ok(())
     }
 
@@ -1290,7 +1380,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let root = temporary.join("workspaces").join("oauth_login");
-        let worktrees = materialize_worktrees(&root, "OAuth login", "agent/oauth_login", &plans)?;
+        let worktrees = materialize_worktrees(
+            WorktreeManager::Git,
+            &root,
+            "OAuth login",
+            "agent/oauth_login",
+            &plans,
+        )?;
 
         assert_eq!(worktrees.len(), 2);
         for worktree in &worktrees {
@@ -1314,6 +1410,7 @@ mod tests {
             workspace_id: "workspace-1".into(),
             created_at_unix: 1,
             archived_at_unix: None,
+            worktree_manager: WorktreeManager::Git,
             repositories: plans
                 .iter()
                 .zip(&worktrees)
@@ -1358,8 +1455,33 @@ mod tests {
         assert!(root.exists());
 
         fs::remove_file(worktrees[0].join("dirty.txt"))?;
+        let relocated = temporary.join("relocated");
+        checked(
+            Command::new("git")
+                .arg("-C")
+                .arg(&record.repositories[1].source)
+                .args(["worktree", "move"])
+                .arg(&record.repositories[1].worktree)
+                .arg(&relocated),
+        )?;
+        let error = archive_dock(&record, false).expect_err("relocated worktree must be refused");
+        assert!(error.to_string().contains("is checked out at"));
+        checked(
+            Command::new("git")
+                .arg("-C")
+                .arg(&record.repositories[1].source)
+                .args(["worktree", "move"])
+                .arg(&relocated)
+                .arg(&record.repositories[1].worktree),
+        )?;
+        record.worktree_manager.remove(
+            &record.repositories[0].source,
+            &record.repositories[0].worktree,
+        )?;
+        assert!(!worktrees[0].exists());
         archive_dock(&record, false)?;
         assert!(!root.exists());
+        archive_dock(&record, false)?;
         for plan in &plans {
             git(
                 &plan.repository.path,
