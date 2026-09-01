@@ -1,0 +1,24 @@
+id = "herdr-dock"
+name = "herdr-dock"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Create coordinated Herdr workspaces across multiple repositories"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cargo", "build", "--release"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "create"
+title = "Create dock"
+contexts = ["global"]
+command = ["target/release/herdr-dock", "open"]
+
+[[panes]]
+id = "create"
+title = "Create dock"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["target/release/herdr-dock", "create"]

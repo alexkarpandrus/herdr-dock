@@ -1,0 +1,72 @@
+# herdr-dock
+
+A [Herdr](https://herdr.dev) plugin for creating one coordinated workspace across multiple Git repositories.
+
+## What it does
+
+The `herdr-dock.create` action opens a terminal popup that:
+
+1. accepts a project name and previews its `<prefix>/<snake_case_slug>` branch;
+2. selects one or more configured repositories;
+3. loads or saves named repository presets with `P` and `S`;
+4. selects and remembers a base ref for each repository;
+5. creates the repositories as sibling Git worktrees;
+6. writes `AGENTS.md` and `CLAUDE.md` in their shared root; and
+7. opens one Herdr tab per repository, plus a `shared` tab when multiple repositories are selected.
+
+## Install for development
+
+```sh
+herdr plugin link /path/to/herdr-dock
+```
+
+Herdr runs `cargo build --release` while linking or installing the plugin.
+
+## Configure repositories
+
+Invoke the action once to create the plugin's `config.toml`, or find its directory with:
+
+```sh
+herdr plugin config-dir herdr-dock
+```
+
+```toml
+branch_prefix = "agent"
+# By default, worktrees live under HERDR_PLUGIN_STATE_DIR/workspaces.
+# worktree_root = "~/worktrees"
+
+[[repositories]]
+name = "api"
+path = "~/src/api"
+
+[[repositories]]
+name = "web"
+path = "~/src/web"
+```
+
+The optional `name` becomes the worktree directory and tab label. Repository names must be unique.
+
+## Bind a hotkey
+
+Add a plugin action binding to your Herdr user configuration:
+
+```toml
+[[keys.command]]
+key = "prefix+d"
+type = "plugin_action"
+command = "herdr-dock.create"
+description = "create dock"
+```
+
+Herdr plugin v1 requires users to declare plugin hotkeys in their Herdr configuration.
+
+## Development
+
+```sh
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
+
+## License
+
+MIT
