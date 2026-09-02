@@ -20,6 +20,8 @@ The `herdr-dock.overview` action shows saved dock history with live Herdr worksp
 
 Herdr Dock uses one JSON file at `$HERDR_PLUGIN_STATE_DIR/state.json`. It does not use a database. It writes through a temporary file and renames it atomically. It writes only when dock lifecycle data or resumable agent metadata changes.
 
+A per-state-file lock permits only one Herdr Dock management action at a time. If another create or overview action is already open for the same state directory, the second action exits with a retry message. Running docks and agent sessions are not locked. Temporary state files include the writer process ID, so concurrent or interrupted writers do not share a temporary path.
+
 Each dock record stores its Herdr session name, current workspace ID, tab labels and working directories, repositories, completion time, and the last observed recognized agents. Each agent record stores its tab, name, kind, working directory, and Herdr-provided resumable session ID or path:
 
 ```json
@@ -56,7 +58,7 @@ Requirements:
 - macOS or Linux;
 - [Herdr](https://herdr.dev) 0.8.2 or newer;
 - Git; and
-- Rust and Cargo to build the plugin.
+- Rust 1.89 or newer and Cargo to build the plugin.
 
 ### Install from GitHub
 

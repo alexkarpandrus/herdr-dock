@@ -282,6 +282,7 @@ fn open_popup(entrypoint: &str) -> Result<()> {
 fn show_overview() -> Result<()> {
     let state_dir = required_directory("HERDR_PLUGIN_STATE_DIR")?;
     let state_path = state_dir.join("state.json");
+    let _state_lock = lock_state(&state_path)?;
     let mut state = load_state(&state_path)?;
     if state.docks.is_empty() {
         return Err(message("no docks have been created yet"));
@@ -1054,6 +1055,7 @@ fn create_dock() -> Result<()> {
     let state_dir = required_directory("HERDR_PLUGIN_STATE_DIR")?;
     let config_path = config_dir.join("config.toml");
     let state_path = state_dir.join("state.json");
+    let _state_lock = lock_state(&state_path)?;
     let config = load_config(&config_path)?;
     let mut state = load_state(&state_path)?;
     let herdr_session = current_herdr_session()?;
@@ -1733,11 +1735,37 @@ fn load_state(path: &Path) -> Result<State> {
     }
 }
 
+fn lock_state(path: &Path) -> Result<fs::File> {
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_extension("json.lock"))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(fs::TryLockError::WouldBlock) => Err(message(
+            "another Herdr Dock action is open; close it and try again",
+        )),
+        Err(fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
 fn save_state(path: &Path, state: &State) -> Result<()> {
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, serde_json::to_vec_pretty(state)?)?;
-    fs::rename(temporary, path)?;
-    Ok(())
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("state.json");
+    let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    let result = (|| -> Result<()> {
+        fs::write(&temporary, serde_json::to_vec_pretty(state)?)?;
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
 }
 
 fn expand_home(path: &Path) -> Result<PathBuf> {
@@ -2331,11 +2359,32 @@ mod tests {
         assert_eq!(overview[0].agents[0].status, "done");
 
         let state_path = temporary.join("state.json");
+        let first_lock = lock_state(&state_path)?;
+        let child = Command::new(env::current_exe()?)
+            .args(["--exact", "tests::state_lock_child", "--nocapture"])
+            .env("HERDR_DOCK_LOCK_TEST_PATH", &state_path)
+            .status()?;
+        assert!(child.success());
+        drop(first_lock);
         save_state(&state_path, &state)?;
         let loaded = load_state(&state_path)?;
         assert_eq!(loaded.docks[0].agents, state.docks[0].agents);
-        assert!(!temporary.join("state.json.tmp").exists());
+        assert!(
+            !temporary
+                .join(format!(".state.json.{}.tmp", std::process::id()))
+                .exists()
+        );
         fs::remove_dir_all(temporary)?;
+        Ok(())
+    }
+
+    #[test]
+    fn state_lock_child() -> Result<()> {
+        let Some(path) = env::var_os("HERDR_DOCK_LOCK_TEST_PATH") else {
+            return Ok(());
+        };
+        let error = lock_state(Path::new(&path)).expect_err("second process must be refused");
+        assert!(error.to_string().contains("another Herdr Dock action"));
         Ok(())
     }
 
