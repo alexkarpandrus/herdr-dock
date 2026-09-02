@@ -93,7 +93,6 @@ struct DockRecord {
     workspace_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     herdr_session: Option<String>,
-    created_at_unix: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     completed_at_unix: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -178,6 +177,7 @@ struct AgentOverview {
 }
 
 struct DockOverview {
+    record_index: usize,
     name: String,
     branch: String,
     root: PathBuf,
@@ -202,6 +202,18 @@ struct Ui {
     stdout: Stdout,
 }
 
+fn terminal_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control() {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
 impl Ui {
     fn start() -> Result<Self> {
         terminal::enable_raw_mode()?;
@@ -219,12 +231,12 @@ impl Ui {
             MoveTo(0, 0),
             Clear(ClearType::All),
             SetAttribute(Attribute::Bold),
-            Print(title),
+            Print(terminal_text(title)),
             SetAttribute(Attribute::Reset),
             Print("\r\n\r\n")
         )?;
         for line in lines {
-            queue!(self.stdout, Print(line), Print("\r\n"))?;
+            queue!(self.stdout, Print(terminal_text(line)), Print("\r\n"))?;
         }
         self.stdout.flush()?;
         Ok(())
@@ -289,7 +301,7 @@ fn show_overview() -> Result<()> {
     }
 
     let current_session = current_herdr_session()?;
-    let mut docks = collect_overview(&mut state, &state_path)?;
+    let mut docks = collect_overview(&mut state, &state_path, current_session.as_deref())?;
     let mut cursor: usize = 0;
     let mut ui = Ui::start()?;
     loop {
@@ -374,24 +386,23 @@ fn show_overview() -> Result<()> {
             KeyCode::Up => cursor = cursor.saturating_sub(1),
             KeyCode::Down => cursor = (cursor + 1).min(docks.len() - 1),
             KeyCode::Char('r') | KeyCode::Char('R') => {
-                docks = collect_overview(&mut state, &state_path)?;
+                docks = collect_overview(&mut state, &state_path, current_session.as_deref())?;
             }
             KeyCode::Char('d') | KeyCode::Char('D') if !dock.archived && !dock.done => {
-                let root = dock.root.clone();
+                let index = dock.record_index;
                 let open = dock.open;
                 if !confirm_complete(&mut ui, dock)? {
                     continue;
                 }
-                let index = state
-                    .docks
-                    .iter()
-                    .position(|record| record.root == root)
-                    .ok_or_else(|| message("dock history record is missing"))?;
                 let completed_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
                 drop(ui);
                 let complete_result = (|| -> Result<()> {
                     check_dock_session(&state.docks[index], current_session.as_deref())?;
                     if open {
+                        let live = live_workspaces()?;
+                        if sync_dock_agents(&mut state.docks, &live, current_session.as_deref()) {
+                            save_state(&state_path, &state)?;
+                        }
                         herdr(&["workspace", "close", &state.docks[index].workspace_id])?;
                     }
                     state.docks[index].completed_at_unix = Some(completed_at);
@@ -402,29 +413,30 @@ fn show_overview() -> Result<()> {
                 })();
                 ui = Ui::start()?;
                 match complete_result {
-                    Ok(()) => docks = collect_overview(&mut state, &state_path)?,
+                    Ok(()) => {
+                        docks =
+                            collect_overview(&mut state, &state_path, current_session.as_deref())?
+                    }
                     Err(error) => show_notice(&mut ui, "Dock not closed", &error.to_string())?,
                 }
             }
             KeyCode::Char('a') | KeyCode::Char('A') if !dock.archived => {
-                let root = dock.root.clone();
+                let index = dock.record_index;
                 let open = dock.open;
                 if !confirm_archive(&mut ui, dock)? {
                     continue;
                 }
-                let index = state
-                    .docks
-                    .iter()
-                    .position(|record| record.root == root)
-                    .ok_or_else(|| message("dock history record is missing"))?;
                 let archived_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
                 drop(ui);
-                let mut archive_result = if open {
-                    check_dock_session(&state.docks[index], current_session.as_deref())
-                        .and_then(|()| archive_dock(&state.docks[index], true))
-                } else {
-                    archive_dock(&state.docks[index], false)
-                };
+                let mut archive_result = (|| -> Result<()> {
+                    ensure_no_live_legacy_workspace(&state.docks[index])?;
+                    if open {
+                        check_dock_session(&state.docks[index], current_session.as_deref())?;
+                        archive_dock(&state.docks[index], true)
+                    } else {
+                        archive_dock(&state.docks[index], false)
+                    }
+                })();
                 if archive_result.is_ok() {
                     state.docks[index].archived_at_unix = Some(archived_at);
                     if let Err(error) = save_state(&state_path, &state) {
@@ -434,21 +446,19 @@ fn show_overview() -> Result<()> {
                 }
                 ui = Ui::start()?;
                 match archive_result {
-                    Ok(()) => docks = collect_overview(&mut state, &state_path)?,
+                    Ok(()) => {
+                        docks =
+                            collect_overview(&mut state, &state_path, current_session.as_deref())?
+                    }
                     Err(error) => {
                         show_notice(&mut ui, "Dock not archived", &error.to_string())?;
                     }
                 }
             }
             KeyCode::Enter if !dock.archived => {
-                let root = dock.root.clone();
+                let index = dock.record_index;
                 let open = dock.open;
                 let workspace_id = dock.workspace_id.clone();
-                let index = state
-                    .docks
-                    .iter()
-                    .position(|record| record.root == root)
-                    .ok_or_else(|| message("dock history record is missing"))?;
                 drop(ui);
                 let result = if open {
                     check_dock_session(&state.docks[index], current_session.as_deref())
@@ -467,7 +477,8 @@ fn show_overview() -> Result<()> {
                     Err(error) => {
                         ui = Ui::start()?;
                         show_notice(&mut ui, "Workspace not opened", &error.to_string())?;
-                        docks = collect_overview(&mut state, &state_path)?;
+                        docks =
+                            collect_overview(&mut state, &state_path, current_session.as_deref())?;
                     }
                 }
             }
@@ -476,29 +487,53 @@ fn show_overview() -> Result<()> {
     }
 }
 
-fn collect_overview(state: &mut State, state_path: &Path) -> Result<Vec<DockOverview>> {
+fn collect_overview(
+    state: &mut State,
+    state_path: &Path,
+    current_session: Option<&str>,
+) -> Result<Vec<DockOverview>> {
     let live = live_workspaces()?;
-    if sync_dock_agents(&mut state.docks, &live) {
+    if sync_dock_agents(&mut state.docks, &live, current_session) {
         save_state(state_path, state)?;
     }
-    Ok(build_overview(&state.docks, &live))
+    Ok(build_overview(&state.docks, &live, current_session))
+}
+
+fn legacy_workspace_is_live(record: &DockRecord, live: &BTreeMap<String, LiveWorkspace>) -> bool {
+    record.herdr_session.is_none() && live.contains_key(&record.workspace_id)
+}
+
+fn ensure_no_live_legacy_workspace(record: &DockRecord) -> Result<()> {
+    if record.herdr_session.is_none() && legacy_workspace_is_live(record, &live_workspaces()?) {
+        return Err(message(
+            "legacy dock may still be open; close its old workspace before continuing",
+        ));
+    }
+    Ok(())
 }
 
 fn build_overview(
     records: &[DockRecord],
     live: &BTreeMap<String, LiveWorkspace>,
+    current_session: Option<&str>,
 ) -> Vec<DockOverview> {
     records
         .iter()
+        .enumerate()
         .rev()
-        .map(|record| {
+        .map(|(record_index, record)| {
             let archived = record.archived_at_unix.is_some();
             let done = record.completed_at_unix.is_some();
-            let workspace = (!archived)
+            let workspace = (!archived
+                && current_session.is_some()
+                && record.herdr_session.as_deref() == current_session)
                 .then(|| live.get(&record.workspace_id))
                 .flatten();
+            let legacy_workspace = !archived && legacy_workspace_is_live(record, live);
             let status = if archived {
                 "archived".into()
+            } else if legacy_workspace {
+                "session unknown".into()
             } else if !record.root.exists() {
                 "missing".into()
             } else if done && workspace.is_none() {
@@ -558,13 +593,14 @@ fn build_overview(
                 |workspace| workspace.agents.clone(),
             );
             DockOverview {
+                record_index,
                 name: record.name.clone(),
                 branch: record.branch.clone(),
                 root: record.root.clone(),
                 workspace_id: record.workspace_id.clone(),
                 herdr_session: record.herdr_session.clone(),
                 status,
-                open: workspace.is_some(),
+                open: workspace.is_some() || legacy_workspace,
                 done,
                 archived,
                 tab_count: workspace.map_or_else(
@@ -621,18 +657,33 @@ fn show_notice(ui: &mut Ui, title: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
-fn archive_dock(record: &DockRecord, close_workspace: bool) -> Result<()> {
-    let root_exists = record.root.exists();
-    if root_exists && !record.root.is_dir() {
-        return Err(message(format!(
-            "dock root is not a directory: {}",
-            record.root.display()
-        )));
-    }
-
+fn preflight_archive(record: &DockRecord) -> Result<bool> {
+    let root_exists = match fs::symlink_metadata(&record.root) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(message(format!(
+                    "dock root is a symbolic link: {}",
+                    record.root.display()
+                )));
+            }
+            if !metadata.is_dir() {
+                return Err(message(format!(
+                    "dock root is not a directory: {}",
+                    record.root.display()
+                )));
+            }
+            true
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    let canonical_root = root_exists
+        .then(|| record.root.canonicalize())
+        .transpose()?;
     let mut has_worktrees = false;
     let mut allowed =
         BTreeSet::from([record.root.join("AGENTS.md"), record.root.join("CLAUDE.md")]);
+
     for repository in &record.repositories {
         if repository.worktree.parent() != Some(record.root.as_path()) {
             return Err(message(format!(
@@ -641,38 +692,90 @@ fn archive_dock(record: &DockRecord, close_workspace: bool) -> Result<()> {
             )));
         }
         allowed.insert(repository.worktree.clone());
-        if !repository.worktree.exists() {
-            if let Some(registered) =
-                registered_worktree(&repository.source, &repository.worktree, &record.branch)?
-            {
-                if registered == repository.worktree {
+        let metadata = match fs::symlink_metadata(&repository.worktree) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if let Some(registered) =
+                    registered_worktree(&repository.source, &repository.worktree, &record.branch)?
+                {
+                    if registered == repository.worktree {
+                        return Err(message(format!(
+                            "worktree is missing but still registered: {}",
+                            repository.worktree.display()
+                        )));
+                    }
                     return Err(message(format!(
-                        "worktree is missing but still registered: {}",
-                        repository.worktree.display()
+                        "branch {} is checked out at {}",
+                        record.branch,
+                        registered.display()
                     )));
                 }
-                return Err(message(format!(
-                    "branch {} is checked out at {}",
-                    record.branch,
-                    registered.display()
-                )));
+                continue;
             }
-            continue;
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(message(format!(
+                "worktree is a symbolic link: {}",
+                repository.worktree.display()
+            )));
         }
-        if !repository.worktree.is_dir() {
+        if !metadata.is_dir() {
             return Err(message(format!(
                 "worktree is not a directory: {}",
                 repository.worktree.display()
             )));
         }
-        if !git(&repository.worktree, ["status", "--porcelain"])?.is_empty() {
+
+        let canonical_worktree = repository.worktree.canonicalize()?;
+        if canonical_worktree.parent() != canonical_root.as_deref() {
+            return Err(message(format!(
+                "worktree is outside the dock root: {}",
+                repository.worktree.display()
+            )));
+        }
+        let actual_root =
+            PathBuf::from(git(&repository.worktree, ["rev-parse", "--show-toplevel"])?);
+        if actual_root.canonicalize()? != canonical_worktree {
+            return Err(message(format!(
+                "worktree path resolves to another repository: {}",
+                repository.worktree.display()
+            )));
+        }
+        let actual_branch = git(&repository.worktree, ["branch", "--show-current"])?;
+        if actual_branch != record.branch {
+            return Err(message(format!(
+                "{} uses branch {actual_branch}, expected {}",
+                repository.name, record.branch
+            )));
+        }
+        if !git(
+            &repository.worktree,
+            [
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ],
+        )?
+        .is_empty()
+        {
             return Err(message(format!(
                 "{} has uncommitted or untracked changes",
                 repository.name
             )));
         }
+        if !git(
+            &repository.worktree,
+            ["ls-files", "--others", "--ignored", "--exclude-standard"],
+        )?
+        .is_empty()
+        {
+            return Err(message(format!("{} has ignored files", repository.name)));
+        }
         has_worktrees = true;
     }
+
     if root_exists {
         for entry in fs::read_dir(&record.root)? {
             let path = entry?.path();
@@ -684,28 +787,78 @@ fn archive_dock(record: &DockRecord, close_workspace: bool) -> Result<()> {
             }
         }
     }
-    if has_worktrees {
+    Ok(has_worktrees)
+}
+
+fn archive_dock(record: &DockRecord, close_workspace: bool) -> Result<()> {
+    if preflight_archive(record)? {
         record.worktree_manager.ensure_available()?;
     }
-
     if close_workspace {
         herdr(&["workspace", "close", &record.workspace_id])?;
+        preflight_archive(record)?;
     }
-    for repository in &record.repositories {
-        if repository.worktree.is_dir() {
-            record
-                .worktree_manager
-                .remove(&repository.source, &repository.worktree)?;
-        }
-    }
-    if root_exists {
-        for guide in ["AGENTS.md", "CLAUDE.md"] {
-            let path = record.root.join(guide);
-            if path.exists() {
-                fs::remove_file(path)?;
+
+    let mut guides = Vec::new();
+    if record.root.exists() {
+        for name in ["AGENTS.md", "CLAUDE.md"] {
+            let path = record.root.join(name);
+            if path.is_file() {
+                guides.push((path.clone(), fs::read(path)?));
             }
         }
-        fs::remove_dir(&record.root)?;
+    }
+
+    let restore = |removed: &[&DockRepository]| {
+        let mut errors = Vec::new();
+        for repository in removed.iter().rev() {
+            if let Err(error) = record.worktree_manager.create(
+                &repository.source,
+                &repository.worktree,
+                &record.branch,
+                &repository.base_ref,
+                true,
+            ) {
+                errors.push(error.to_string());
+            }
+        }
+        errors
+    };
+    let mut removed: Vec<&DockRepository> = Vec::new();
+    for repository in &record.repositories {
+        if repository.worktree.is_dir() {
+            if let Err(error) = record
+                .worktree_manager
+                .remove(&repository.source, &repository.worktree)
+            {
+                return Err(with_cleanup_errors(error, restore(&removed)));
+            }
+            removed.push(repository);
+        }
+    }
+
+    let cleanup = (|| -> Result<()> {
+        if record.root.exists() {
+            for guide in ["AGENTS.md", "CLAUDE.md"] {
+                let path = record.root.join(guide);
+                if path.exists() {
+                    fs::remove_file(path)?;
+                }
+            }
+            fs::remove_dir(&record.root)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = cleanup {
+        let mut restore_errors = restore(&removed);
+        for (path, contents) in guides {
+            if !path.exists()
+                && let Err(restore_error) = fs::write(&path, contents)
+            {
+                restore_errors.push(restore_error.to_string());
+            }
+        }
+        return Err(with_cleanup_errors(error, restore_errors));
     }
     Ok(())
 }
@@ -877,12 +1030,17 @@ fn parse_live_workspaces(
     workspaces
 }
 
-fn sync_dock_agents(records: &mut [DockRecord], live: &BTreeMap<String, LiveWorkspace>) -> bool {
+fn sync_dock_agents(
+    records: &mut [DockRecord],
+    live: &BTreeMap<String, LiveWorkspace>,
+    current_session: Option<&str>,
+) -> bool {
     let mut changed = false;
-    for record in records
-        .iter_mut()
-        .filter(|record| record.archived_at_unix.is_none())
-    {
+    for record in records.iter_mut().filter(|record| {
+        record.archived_at_unix.is_none()
+            && current_session.is_some()
+            && record.herdr_session.as_deref() == current_session
+    }) {
         let Some(workspace) = live.get(&record.workspace_id) else {
             continue;
         };
@@ -982,9 +1140,12 @@ fn current_herdr_session() -> Result<Option<String>> {
 }
 
 fn check_dock_session(record: &DockRecord, current: Option<&str>) -> Result<()> {
-    if let Some(expected) = record.herdr_session.as_deref()
-        && current != Some(expected)
-    {
+    let Some(expected) = record.herdr_session.as_deref() else {
+        return Err(message(
+            "dock belongs to an unknown legacy Herdr session; close its old workspace before reopening it",
+        ));
+    };
+    if current != Some(expected) {
         return Err(message(format!(
             "dock belongs to Herdr session {expected}; reopen it from that session"
         )));
@@ -998,7 +1159,16 @@ fn reopen_dock(
     state_path: &Path,
     current_session: Option<&str>,
 ) -> Result<Vec<String>> {
-    check_dock_session(&state.docks[index], current_session)?;
+    if state.docks[index].herdr_session.is_none() {
+        if current_session.is_none() {
+            return Err(message(
+                "cannot reopen legacy dock without a current Herdr session",
+            ));
+        }
+        ensure_no_live_legacy_workspace(&state.docks[index])?;
+    } else {
+        check_dock_session(&state.docks[index], current_session)?;
+    }
     if !state.docks[index].root.is_dir() {
         return Err(message(format!(
             "dock root is missing: {}",
@@ -1120,6 +1290,11 @@ fn create_dock() -> Result<()> {
 
     println!("Creating {branch} in {}...", root.display());
     let worktrees = materialize_worktrees(config.worktree_manager, &root, &name, &branch, &plans)?;
+    let created = plans
+        .iter()
+        .zip(&worktrees)
+        .map(|(plan, worktree)| (plan.repository.path.clone(), worktree.clone()))
+        .collect::<Vec<_>>();
     let dock_repositories = plans
         .iter()
         .zip(&worktrees)
@@ -1131,7 +1306,15 @@ fn create_dock() -> Result<()> {
         })
         .collect::<Vec<_>>();
     let dock_tabs = default_dock_tabs(&root, &dock_repositories);
-    let workspace = open_workspace(&name, &dock_tabs)?;
+    let workspace = match open_workspace(&name, &dock_tabs) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            return Err(with_cleanup_errors(
+                error,
+                cleanup_materialized_worktrees(config.worktree_manager, &root, &created),
+            ));
+        }
+    };
 
     for plan in &plans {
         state
@@ -1151,7 +1334,6 @@ fn create_dock() -> Result<()> {
         root: root.clone(),
         workspace_id: workspace.id.clone(),
         herdr_session,
-        created_at_unix: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         completed_at_unix: None,
         archived_at_unix: None,
         worktree_manager: config.worktree_manager,
@@ -1159,7 +1341,14 @@ fn create_dock() -> Result<()> {
         tabs: dock_tabs,
         repositories: dock_repositories,
     });
-    save_state(&state_path, &state)?;
+    if let Err(error) = save_state(&state_path, &state) {
+        state.docks.pop();
+        let cleanup_errors = match herdr(&["workspace", "close", &workspace.id]) {
+            Ok(_) => cleanup_materialized_worktrees(config.worktree_manager, &root, &created),
+            Err(close_error) => vec![format!("could not close workspace: {close_error}")],
+        };
+        return Err(with_cleanup_errors(error, cleanup_errors));
+    }
     herdr(&["workspace", "focus", &workspace.id])?;
     println!("Created dock {name}.");
     Ok(())
@@ -1839,6 +2028,49 @@ fn default_base_ref(repository: &Path, refs: &[String]) -> Option<String> {
         .or_else(|| Some("HEAD".into()))
 }
 
+fn cleanup_materialized_worktrees(
+    manager: WorktreeManager,
+    root: &Path,
+    created: &[(PathBuf, PathBuf)],
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (repository, worktree) in created.iter().rev() {
+        if worktree.exists()
+            && let Err(error) = manager.remove(repository, worktree)
+        {
+            errors.push(error.to_string());
+        }
+    }
+    if errors.is_empty() {
+        for guide in ["AGENTS.md", "CLAUDE.md"] {
+            let path = root.join(guide);
+            if path.exists()
+                && let Err(error) = fs::remove_file(&path)
+            {
+                errors.push(format!("could not remove {}: {error}", path.display()));
+            }
+        }
+        if errors.is_empty()
+            && root.exists()
+            && let Err(error) = fs::remove_dir(root)
+        {
+            errors.push(format!("could not remove {}: {error}", root.display()));
+        }
+    }
+    errors
+}
+
+fn with_cleanup_errors(error: Box<dyn Error>, cleanup_errors: Vec<String>) -> Box<dyn Error> {
+    if cleanup_errors.is_empty() {
+        error
+    } else {
+        message(format!(
+            "{error}; cleanup incomplete: {}",
+            cleanup_errors.join("; ")
+        ))
+    }
+}
+
 fn materialize_worktrees(
     manager: WorktreeManager,
     root: &Path,
@@ -1886,26 +2118,10 @@ fn materialize_worktrees(
         Ok(())
     })();
     if let Err(error) = result {
-        let mut cleanup_errors = Vec::new();
-        for (repository, worktree) in created.iter().rev() {
-            if let Err(cleanup_error) = manager.remove(repository, worktree) {
-                cleanup_errors.push(cleanup_error.to_string());
-            }
-        }
-        if cleanup_errors.is_empty() {
-            for guide in ["AGENTS.md", "CLAUDE.md"] {
-                let path = root.join(guide);
-                if path.exists() {
-                    fs::remove_file(path)?;
-                }
-            }
-            fs::remove_dir(root)?;
-            return Err(error);
-        }
-        return Err(message(format!(
-            "{error}; cleanup incomplete: {}",
-            cleanup_errors.join("; ")
-        )));
+        return Err(with_cleanup_errors(
+            error,
+            cleanup_materialized_worktrees(manager, root, &created),
+        ));
     }
     Ok(created.into_iter().map(|(_, path)| path).collect())
 }
@@ -2235,6 +2451,48 @@ mod tests {
     }
 
     #[test]
+    fn escapes_terminal_control_characters() {
+        assert_eq!(
+            terminal_text("safe\x1b]52;clipboard\x07\n"),
+            "safe\\u{1b}]52;clipboard\\u{7}\\n"
+        );
+    }
+
+    #[test]
+    fn overview_keeps_the_state_record_index() -> Result<()> {
+        let records: Vec<DockRecord> = serde_json::from_str(
+            r#"[
+                {"name":"old","slug":"same","branch":"agent/same","root":"/tmp/same","workspace_id":"old","created_at_unix":1,"archived_at_unix":2,"repositories":[]},
+                {"name":"new","slug":"same","branch":"agent/same","root":"/tmp/same","workspace_id":"new","created_at_unix":3,"repositories":[]}
+            ]"#,
+        )?;
+
+        let live = BTreeMap::from([(
+            "new".into(),
+            LiveWorkspace {
+                status: "working".into(),
+                agents: Vec::new(),
+                tabs: Vec::new(),
+            },
+        )]);
+        let overview = build_overview(&records, &live, Some("default"));
+        assert!(
+            overview[0].open,
+            "a live legacy workspace must block actions"
+        );
+        assert_eq!(overview[0].status, "session unknown");
+        assert!(check_dock_session(&records[1], Some("default")).is_err());
+        assert_eq!(
+            overview
+                .iter()
+                .map(|dock| dock.record_index)
+                .collect::<Vec<_>>(),
+            [1, 0]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn loads_and_replaces_repository_presets() -> Result<()> {
         let repositories = ["api", "web"].map(|name| Repository {
             name: name.into(),
@@ -2332,7 +2590,6 @@ mod tests {
             root: temporary.clone(),
             workspace_id: "w1".into(),
             herdr_session: Some("default".into()),
-            created_at_unix: 1,
             completed_at_unix: None,
             archived_at_unix: None,
             worktree_manager: WorktreeManager::Git,
@@ -2345,8 +2602,11 @@ mod tests {
         assert!(check_dock_session(&state.docks[0], Some("other")).is_err());
         assert!(check_dock_session(&state.docks[0], None).is_err());
 
-        assert!(sync_dock_agents(&mut state.docks, &live));
-        assert!(!sync_dock_agents(&mut state.docks, &live));
+        assert!(!sync_dock_agents(&mut state.docks, &live, Some("other")));
+        assert!(state.docks[0].agents.is_empty());
+
+        assert!(sync_dock_agents(&mut state.docks, &live, Some("default")));
+        assert!(!sync_dock_agents(&mut state.docks, &live, Some("default")));
         assert_eq!(state.docks[0].tabs[0].label, "work");
         assert_eq!(state.docks[0].agents[0].tab, Some(0));
         assert_eq!(
@@ -2354,7 +2614,7 @@ mod tests {
             Some(vec!["resume".into(), "session-123".into()])
         );
         state.docks[0].completed_at_unix = Some(2);
-        let overview = build_overview(&state.docks, &BTreeMap::new());
+        let overview = build_overview(&state.docks, &BTreeMap::new(), Some("default"));
         assert_eq!(overview[0].status, "done");
         assert_eq!(overview[0].agents[0].status, "done");
 
@@ -2495,8 +2755,7 @@ mod tests {
             branch: "agent/oauth_login".into(),
             root: root.clone(),
             workspace_id: "workspace-1".into(),
-            herdr_session: None,
-            created_at_unix: 1,
+            herdr_session: Some("default".into()),
             completed_at_unix: None,
             archived_at_unix: None,
             worktree_manager: WorktreeManager::Git,
@@ -2529,7 +2788,7 @@ mod tests {
                 tabs: Vec::new(),
             },
         )]);
-        let overview = build_overview(std::slice::from_ref(&record), &live);
+        let overview = build_overview(std::slice::from_ref(&record), &live, Some("default"));
         assert!(overview[0].open);
         assert_eq!(overview[0].status, "working");
         assert_eq!(overview[0].agents.len(), 1);
@@ -2551,6 +2810,50 @@ mod tests {
         assert!(root.exists());
 
         fs::remove_file(worktrees[0].join("dirty.txt"))?;
+        let agents_guide = root.join("AGENTS.md");
+        let guide = fs::read(&agents_guide)?;
+        fs::remove_file(&agents_guide)?;
+        fs::create_dir(&agents_guide)?;
+        archive_dock(&record, false).expect_err("root cleanup failure must be reported");
+        assert!(worktrees.iter().all(|worktree| worktree.is_dir()));
+        fs::remove_dir(&agents_guide)?;
+        fs::write(&agents_guide, guide)?;
+        fs::write(worktrees[0].join(".gitignore"), ".ignored\n")?;
+        checked(
+            Command::new("git")
+                .arg("-C")
+                .arg(&worktrees[0])
+                .args(["add", ".gitignore"]),
+        )?;
+        checked(Command::new("git").arg("-C").arg(&worktrees[0]).args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--quiet",
+            "-m",
+            "ignore local files",
+        ]))?;
+        fs::write(worktrees[0].join(".ignored"), "must survive")?;
+        let error = archive_dock(&record, false).expect_err("ignored files must be refused");
+        assert!(error.to_string().contains("ignored files"));
+        fs::remove_file(worktrees[0].join(".ignored"))?;
+
+        fs::write(worktrees[0].join("hidden.txt"), "must survive")?;
+        checked(Command::new("git").arg("-C").arg(&worktrees[0]).args([
+            "config",
+            "status.showUntrackedFiles",
+            "no",
+        ]))?;
+        let error =
+            archive_dock(&record, false).expect_err("hidden untracked files must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("uncommitted or untracked changes")
+        );
+        fs::remove_file(worktrees[0].join("hidden.txt"))?;
         let relocated = temporary.join("relocated");
         checked(
             Command::new("git")
@@ -2560,6 +2863,11 @@ mod tests {
                 .arg(&record.repositories[1].worktree)
                 .arg(&relocated),
         )?;
+        std::os::unix::fs::symlink(&relocated, &record.repositories[1].worktree)?;
+        let error = archive_dock(&record, false).expect_err("symlinked worktree must be refused");
+        assert!(error.to_string().contains("symbolic link"));
+        assert!(relocated.is_dir());
+        fs::remove_file(&record.repositories[1].worktree)?;
         let error = archive_dock(&record, false).expect_err("relocated worktree must be refused");
         assert!(error.to_string().contains("is checked out at"));
         checked(
@@ -2585,8 +2893,27 @@ mod tests {
             )?;
         }
 
+        let rollback_root = temporary.join("workspaces").join("rollback");
+        let rollback_worktrees = materialize_worktrees(
+            WorktreeManager::Git,
+            &rollback_root,
+            "Rollback",
+            "agent/oauth_login",
+            &plans,
+        )?;
+        let rollback_entries = plans
+            .iter()
+            .zip(&rollback_worktrees)
+            .map(|(plan, worktree)| (plan.repository.path.clone(), worktree.clone()))
+            .collect::<Vec<_>>();
+        assert!(
+            cleanup_materialized_worktrees(WorktreeManager::Git, &rollback_root, &rollback_entries)
+                .is_empty()
+        );
+        assert!(!rollback_root.exists());
+
         record.archived_at_unix = Some(2);
-        let overview = build_overview(&[record], &BTreeMap::new());
+        let overview = build_overview(&[record], &BTreeMap::new(), Some("default"));
         assert_eq!(overview[0].status, "archived");
         assert!(overview[0].archived);
         assert!(

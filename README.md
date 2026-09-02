@@ -49,7 +49,7 @@ The overview refreshes this metadata from Herdr. Enter focuses a live workspace.
 
 `D` asks for confirmation, snapshots the latest agent metadata, closes the selected workspace and all its tabs and processes, keeps the worktrees, and sets the dock status to `done`. It does not stop the named Herdr server because that could stop unrelated workspaces. Reopening clears the completion time and makes the dock active again.
 
-`A` remains the destructive archive action. It refuses dirty worktrees, closes an open workspace, removes clean worktrees, and keeps the Git branches and archived history record.
+`A` remains the destructive archive action. It refuses worktrees with tracked, untracked, or ignored files, rejects symbolic links and relocated worktrees, closes an open workspace, removes verified worktrees, and keeps the Git branches and archived history record.
 
 ## Install
 

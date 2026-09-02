@@ -1,4 +1,4 @@
-use crate::{checked, Result};
+use crate::{checked, git, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
@@ -160,7 +160,7 @@ fn verify_worktree(destination: &Path, branch: &str) -> Result<()> {
             ),
         )
     })?;
-    let actual = PathBuf::from(git_output(destination, ["rev-parse", "--show-toplevel"])?);
+    let actual = PathBuf::from(git(destination, ["rev-parse", "--show-toplevel"])?);
     if fs::canonicalize(&actual)? != expected {
         return Err(io::Error::other(format!(
             "worktree manager created {}, expected {}",
@@ -169,7 +169,7 @@ fn verify_worktree(destination: &Path, branch: &str) -> Result<()> {
         ))
         .into());
     }
-    let actual_branch = git_output(destination, ["branch", "--show-current"])?;
+    let actual_branch = git(destination, ["branch", "--show-current"])?;
     if actual_branch != branch {
         return Err(io::Error::other(format!(
             "worktree at {} uses branch {actual_branch}, expected {branch}",
@@ -178,15 +178,6 @@ fn verify_worktree(destination: &Path, branch: &str) -> Result<()> {
         .into());
     }
     Ok(())
-}
-
-fn git_output<const N: usize>(repository: &Path, arguments: [&str; N]) -> Result<String> {
-    checked(
-        Command::new("git")
-            .arg("-C")
-            .arg(repository)
-            .args(arguments),
-    )
 }
 
 #[cfg(test)]
