@@ -91,11 +91,19 @@ struct DockRecord {
     branch: String,
     root: PathBuf,
     workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    herdr_session: Option<String>,
     created_at_unix: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completed_at_unix: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     archived_at_unix: Option<u64>,
     #[serde(default)]
     worktree_manager: WorktreeManager,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    agents: Vec<DockAgent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tabs: Vec<DockTab>,
     repositories: Vec<DockRepository>,
 }
 
@@ -107,17 +115,66 @@ struct DockRepository {
     base_ref: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct DockTab {
+    label: String,
+    cwd: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct DockAgent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    kind: String,
+    cwd: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tab: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session: Option<AgentSession>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct AgentSession {
+    source: String,
+    agent: String,
+    kind: String,
+    value: String,
+}
+
+struct OpenedWorkspace {
+    id: String,
+    tabs: Vec<OpenedTab>,
+}
+
+struct OpenedTab {
+    cwd: PathBuf,
+    root_pane_id: String,
+}
+
 #[derive(Clone)]
 struct LiveWorkspace {
     status: String,
     agents: Vec<AgentOverview>,
+    tabs: Vec<LiveTab>,
+}
+
+#[derive(Clone)]
+struct LiveTab {
+    id: String,
+    label: String,
+    cwd: String,
+    number: u64,
 }
 
 #[derive(Clone)]
 struct AgentOverview {
     name: String,
+    kind: String,
     status: String,
     cwd: String,
+    tab_id: Option<String>,
+    launch_name: Option<String>,
+    session: Option<AgentSession>,
 }
 
 struct DockOverview {
@@ -125,9 +182,12 @@ struct DockOverview {
     branch: String,
     root: PathBuf,
     workspace_id: String,
+    herdr_session: Option<String>,
     status: String,
     open: bool,
+    done: bool,
     archived: bool,
+    tab_count: usize,
     agents: Vec<AgentOverview>,
     repositories: Vec<RepositoryOverview>,
 }
@@ -227,7 +287,8 @@ fn show_overview() -> Result<()> {
         return Err(message("no docks have been created yet"));
     }
 
-    let mut docks = collect_overview(&state.docks)?;
+    let current_session = current_herdr_session()?;
+    let mut docks = collect_overview(&mut state, &state_path)?;
     let mut cursor: usize = 0;
     let mut ui = Ui::start()?;
     loop {
@@ -244,10 +305,11 @@ fn show_overview() -> Result<()> {
                     .filter(|repository| repository.status == "dirty")
                     .count();
                 format!(
-                    "{} {} [{}] · {} repos · {} dirty · {} agents",
+                    "{} {} [{}] · {} tabs · {} repos · {} dirty · {} agents",
                     if start + offset == cursor { ">" } else { " " },
                     dock.name,
                     dock.status,
+                    dock.tab_count,
                     dock.repositories.len(),
                     dirty,
                     dock.agents.len()
@@ -259,17 +321,30 @@ fn show_overview() -> Result<()> {
             String::new(),
             format!("Branch: {}", dock.branch),
             format!("Root: {}", dock.root.display()),
+            format!(
+                "Herdr session: {}",
+                dock.herdr_session.as_deref().unwrap_or("current/legacy")
+            ),
             String::new(),
             "Agents".into(),
         ]);
         if dock.agents.is_empty() {
             lines.push("  none".into());
         } else {
-            lines.extend(
-                dock.agents
-                    .iter()
-                    .map(|agent| format!("  {} [{}] · {}", agent.name, agent.status, agent.cwd)),
-            );
+            lines.extend(dock.agents.iter().map(|agent| {
+                format!(
+                    "  {} ({}) [{}] · {} · session {}",
+                    agent.name,
+                    agent.kind,
+                    agent.status,
+                    agent.cwd,
+                    agent
+                        .session
+                        .as_ref()
+                        .map(|session| session.value.as_str())
+                        .unwrap_or("unavailable")
+                )
+            }));
         }
         lines.push(String::new());
         lines.push("Repositories".into());
@@ -283,9 +358,11 @@ fn show_overview() -> Result<()> {
         lines.extend([
             String::new(),
             if dock.archived {
-                "↑/↓ select · Enter focus open workspace · R refresh · Esc close".into()
+                "↑/↓ select · R refresh · Esc close".into()
+            } else if dock.done {
+                "↑/↓ select · Enter reopen · A archive/remove · R refresh · Esc close".into()
             } else {
-                "↑/↓ select · Enter focus open workspace · A archive/remove · R refresh · Esc close"
+                "↑/↓ select · Enter focus/reopen · D close/done · A archive/remove · R refresh · Esc close"
                     .into()
             },
         ]);
@@ -296,10 +373,40 @@ fn show_overview() -> Result<()> {
             KeyCode::Up => cursor = cursor.saturating_sub(1),
             KeyCode::Down => cursor = (cursor + 1).min(docks.len() - 1),
             KeyCode::Char('r') | KeyCode::Char('R') => {
-                docks = collect_overview(&state.docks)?;
+                docks = collect_overview(&mut state, &state_path)?;
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') if !dock.archived && !dock.done => {
+                let root = dock.root.clone();
+                let open = dock.open;
+                if !confirm_complete(&mut ui, dock)? {
+                    continue;
+                }
+                let index = state
+                    .docks
+                    .iter()
+                    .position(|record| record.root == root)
+                    .ok_or_else(|| message("dock history record is missing"))?;
+                let completed_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+                drop(ui);
+                let complete_result = (|| -> Result<()> {
+                    check_dock_session(&state.docks[index], current_session.as_deref())?;
+                    if open {
+                        herdr(&["workspace", "close", &state.docks[index].workspace_id])?;
+                    }
+                    state.docks[index].completed_at_unix = Some(completed_at);
+                    if state.docks[index].herdr_session.is_none() {
+                        state.docks[index].herdr_session = current_session.clone();
+                    }
+                    save_state(&state_path, &state)
+                })();
+                ui = Ui::start()?;
+                match complete_result {
+                    Ok(()) => docks = collect_overview(&mut state, &state_path)?,
+                    Err(error) => show_notice(&mut ui, "Dock not closed", &error.to_string())?,
+                }
             }
             KeyCode::Char('a') | KeyCode::Char('A') if !dock.archived => {
-                let workspace_id = dock.workspace_id.clone();
+                let root = dock.root.clone();
                 let open = dock.open;
                 if !confirm_archive(&mut ui, dock)? {
                     continue;
@@ -307,11 +414,16 @@ fn show_overview() -> Result<()> {
                 let index = state
                     .docks
                     .iter()
-                    .position(|record| record.workspace_id == workspace_id)
+                    .position(|record| record.root == root)
                     .ok_or_else(|| message("dock history record is missing"))?;
                 let archived_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
                 drop(ui);
-                let mut archive_result = archive_dock(&state.docks[index], open);
+                let mut archive_result = if open {
+                    check_dock_session(&state.docks[index], current_session.as_deref())
+                        .and_then(|()| archive_dock(&state.docks[index], true))
+                } else {
+                    archive_dock(&state.docks[index], false)
+                };
                 if archive_result.is_ok() {
                     state.docks[index].archived_at_unix = Some(archived_at);
                     if let Err(error) = save_state(&state_path, &state) {
@@ -321,23 +433,54 @@ fn show_overview() -> Result<()> {
                 }
                 ui = Ui::start()?;
                 match archive_result {
-                    Ok(()) => docks = collect_overview(&state.docks)?,
+                    Ok(()) => docks = collect_overview(&mut state, &state_path)?,
                     Err(error) => {
                         show_notice(&mut ui, "Dock not archived", &error.to_string())?;
                     }
                 }
             }
-            KeyCode::Enter if dock.open => {
-                herdr(&["workspace", "focus", &dock.workspace_id])?;
-                return Ok(());
+            KeyCode::Enter if !dock.archived => {
+                let root = dock.root.clone();
+                let open = dock.open;
+                let workspace_id = dock.workspace_id.clone();
+                let index = state
+                    .docks
+                    .iter()
+                    .position(|record| record.root == root)
+                    .ok_or_else(|| message("dock history record is missing"))?;
+                drop(ui);
+                let result = if open {
+                    check_dock_session(&state.docks[index], current_session.as_deref())
+                        .and_then(|()| herdr(&["workspace", "focus", &workspace_id]).map(drop))
+                        .map(|()| Vec::new())
+                } else {
+                    reopen_dock(&mut state, index, &state_path, current_session.as_deref())
+                };
+                match result {
+                    Ok(errors) if errors.is_empty() => return Ok(()),
+                    Ok(errors) => {
+                        ui = Ui::start()?;
+                        show_notice(&mut ui, "Workspace reopened", &errors.join("\n"))?;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        ui = Ui::start()?;
+                        show_notice(&mut ui, "Workspace not opened", &error.to_string())?;
+                        docks = collect_overview(&mut state, &state_path)?;
+                    }
+                }
             }
             _ => {}
         }
     }
 }
 
-fn collect_overview(records: &[DockRecord]) -> Result<Vec<DockOverview>> {
-    Ok(build_overview(records, &live_workspaces()?))
+fn collect_overview(state: &mut State, state_path: &Path) -> Result<Vec<DockOverview>> {
+    let live = live_workspaces()?;
+    if sync_dock_agents(&mut state.docks, &live) {
+        save_state(state_path, state)?;
+    }
+    Ok(build_overview(&state.docks, &live))
 }
 
 fn build_overview(
@@ -349,6 +492,7 @@ fn build_overview(
         .rev()
         .map(|record| {
             let archived = record.archived_at_unix.is_some();
+            let done = record.completed_at_unix.is_some();
             let workspace = (!archived)
                 .then(|| live.get(&record.workspace_id))
                 .flatten();
@@ -356,6 +500,8 @@ fn build_overview(
                 "archived".into()
             } else if !record.root.exists() {
                 "missing".into()
+            } else if done && workspace.is_none() {
+                "done".into()
             } else {
                 workspace
                     .map(|workspace| workspace.status.clone())
@@ -392,17 +538,39 @@ fn build_overview(
                     }
                 })
                 .collect();
+            let agents = workspace.map_or_else(
+                || {
+                    record
+                        .agents
+                        .iter()
+                        .map(|agent| AgentOverview {
+                            name: agent.name.clone().unwrap_or_else(|| agent.kind.clone()),
+                            kind: agent.kind.clone(),
+                            status: if done { "done" } else { "saved" }.into(),
+                            cwd: agent.cwd.to_string_lossy().into(),
+                            tab_id: None,
+                            launch_name: agent.name.clone(),
+                            session: agent.session.clone(),
+                        })
+                        .collect()
+                },
+                |workspace| workspace.agents.clone(),
+            );
             DockOverview {
                 name: record.name.clone(),
                 branch: record.branch.clone(),
                 root: record.root.clone(),
                 workspace_id: record.workspace_id.clone(),
+                herdr_session: record.herdr_session.clone(),
                 status,
                 open: workspace.is_some(),
+                done,
                 archived,
-                agents: workspace
-                    .map(|workspace| workspace.agents.clone())
-                    .unwrap_or_default(),
+                tab_count: workspace.map_or_else(
+                    || record.tabs.len().max(1),
+                    |workspace| workspace.tabs.len().max(1),
+                ),
+                agents,
                 repositories,
             }
         })
@@ -420,6 +588,24 @@ fn confirm_archive(ui: &mut Ui, dock: &DockOverview) -> Result<bool> {
             "Branches and the archived history record remain.".into(),
             String::new(),
             "Y archive/remove · any other key cancel".into(),
+        ],
+    )?;
+    Ok(matches!(
+        read_key()?.code,
+        KeyCode::Char('y') | KeyCode::Char('Y')
+    ))
+}
+
+fn confirm_complete(ui: &mut Ui, dock: &DockOverview) -> Result<bool> {
+    ui.frame(
+        "Close dock",
+        &[
+            format!("Dock: {}", dock.name),
+            String::new(),
+            "This closes its workspace, tabs, and running processes.".into(),
+            "Worktrees and resumable agent session IDs remain.".into(),
+            String::new(),
+            "Y close/done · any other key cancel".into(),
         ],
     )?;
     Ok(matches!(
@@ -550,6 +736,23 @@ fn registered_worktree(source: &Path, worktree: &Path, branch: &str) -> Result<O
 
 fn live_workspaces() -> Result<BTreeMap<String, LiveWorkspace>> {
     let workspace_response = herdr_json(&["workspace", "list"])?;
+    let tab_response = herdr_json(&["tab", "list"])?;
+    let pane_response = herdr_json(&["pane", "list"])?;
+    let agent_response = herdr_json(&["agent", "list"])?;
+    Ok(parse_live_workspaces(
+        &workspace_response,
+        &tab_response,
+        &pane_response,
+        &agent_response,
+    ))
+}
+
+fn parse_live_workspaces(
+    workspace_response: &Value,
+    tab_response: &Value,
+    pane_response: &Value,
+    agent_response: &Value,
+) -> BTreeMap<String, LiveWorkspace> {
     let mut workspaces = BTreeMap::new();
     if let Some(items) = workspace_response
         .pointer("/result/workspaces")
@@ -566,13 +769,62 @@ fn live_workspaces() -> Result<BTreeMap<String, LiveWorkspace>> {
                             .unwrap_or("unknown")
                             .into(),
                         agents: Vec::new(),
+                        tabs: Vec::new(),
                     },
                 );
             }
         }
     }
 
-    let agent_response = herdr_json(&["agent", "list"])?;
+    let mut tab_cwds = BTreeMap::new();
+    if let Some(items) = pane_response
+        .pointer("/result/panes")
+        .and_then(Value::as_array)
+    {
+        for pane in items {
+            if let (Some(tab_id), Some(cwd)) = (
+                pane.get("tab_id").and_then(Value::as_str),
+                pane.get("cwd")
+                    .and_then(Value::as_str)
+                    .or_else(|| pane.get("foreground_cwd").and_then(Value::as_str)),
+            ) {
+                tab_cwds.entry(tab_id.to_owned()).or_insert(cwd.to_owned());
+            }
+        }
+    }
+    if let Some(items) = tab_response
+        .pointer("/result/tabs")
+        .and_then(Value::as_array)
+    {
+        for tab in items {
+            let Some(workspace_id) = tab.get("workspace_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(id) = tab.get("tab_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(workspace) = workspaces.get_mut(workspace_id) else {
+                continue;
+            };
+            workspace.tabs.push(LiveTab {
+                id: id.into(),
+                label: tab
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tab")
+                    .into(),
+                cwd: tab_cwds.get(id).cloned().unwrap_or_default(),
+                number: tab
+                    .get("number")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(u64::MAX),
+            });
+        }
+    }
+    for workspace in workspaces.values_mut() {
+        workspace.tabs.sort_by_key(|tab| tab.number);
+    }
+
     if let Some(items) = agent_response
         .pointer("/result/agents")
         .and_then(Value::as_array)
@@ -584,13 +836,23 @@ fn live_workspaces() -> Result<BTreeMap<String, LiveWorkspace>> {
             let Some(workspace) = workspaces.get_mut(workspace_id) else {
                 continue;
             };
+            let kind = agent
+                .get("agent")
+                .and_then(Value::as_str)
+                .unwrap_or("agent")
+                .to_owned();
+            let launch_name = agent.get("name").and_then(Value::as_str).map(str::to_owned);
+            let session = agent.get("agent_session").and_then(|session| {
+                Some(AgentSession {
+                    source: session.get("source")?.as_str()?.into(),
+                    agent: session.get("agent")?.as_str()?.into(),
+                    kind: session.get("kind")?.as_str()?.into(),
+                    value: session.get("value")?.as_str()?.into(),
+                })
+            });
             workspace.agents.push(AgentOverview {
-                name: agent
-                    .get("agent")
-                    .and_then(Value::as_str)
-                    .or_else(|| agent.get("pane_id").and_then(Value::as_str))
-                    .unwrap_or("agent")
-                    .into(),
+                name: launch_name.clone().unwrap_or_else(|| kind.clone()),
+                kind,
                 status: agent
                     .get("agent_status")
                     .and_then(Value::as_str)
@@ -602,10 +864,189 @@ fn live_workspaces() -> Result<BTreeMap<String, LiveWorkspace>> {
                     .or_else(|| agent.get("cwd").and_then(Value::as_str))
                     .unwrap_or("")
                     .into(),
+                tab_id: agent
+                    .get("tab_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                launch_name,
+                session,
             });
         }
     }
-    Ok(workspaces)
+    workspaces
+}
+
+fn sync_dock_agents(records: &mut [DockRecord], live: &BTreeMap<String, LiveWorkspace>) -> bool {
+    let mut changed = false;
+    for record in records
+        .iter_mut()
+        .filter(|record| record.archived_at_unix.is_none())
+    {
+        let Some(workspace) = live.get(&record.workspace_id) else {
+            continue;
+        };
+        if !workspace.tabs.is_empty() && workspace.tabs.iter().all(|tab| !tab.cwd.is_empty()) {
+            let tabs = workspace
+                .tabs
+                .iter()
+                .map(|tab| DockTab {
+                    label: tab.label.clone(),
+                    cwd: PathBuf::from(&tab.cwd),
+                })
+                .collect::<Vec<_>>();
+            if record.tabs != tabs {
+                record.tabs = tabs;
+                changed = true;
+            }
+        }
+        if workspace.agents.is_empty() {
+            continue;
+        }
+        let mut agents = workspace
+            .agents
+            .iter()
+            .filter(|agent| agent.kind != "agent" && !agent.cwd.is_empty())
+            .map(|agent| {
+                let cwd = PathBuf::from(&agent.cwd);
+                let session = agent.session.clone().or_else(|| {
+                    record
+                        .agents
+                        .iter()
+                        .find(|saved| {
+                            saved.kind == agent.kind
+                                && saved.name == agent.launch_name
+                                && saved.cwd == cwd
+                        })
+                        .and_then(|saved| saved.session.clone())
+                });
+                DockAgent {
+                    name: agent.launch_name.clone(),
+                    kind: agent.kind.clone(),
+                    cwd,
+                    tab: agent
+                        .tab_id
+                        .as_ref()
+                        .and_then(|tab_id| workspace.tabs.iter().position(|tab| &tab.id == tab_id)),
+                    session,
+                }
+            })
+            .collect::<Vec<_>>();
+        for saved in &record.agents {
+            if saved.session.is_some()
+                && !agents.iter().any(|agent| {
+                    agent.name == saved.name
+                        && agent.kind == saved.kind
+                        && agent.cwd == saved.cwd
+                        && agent.tab == saved.tab
+                })
+            {
+                agents.push(saved.clone());
+            }
+        }
+        agents.sort_by(|left, right| {
+            left.tab
+                .cmp(&right.tab)
+                .then_with(|| left.cwd.cmp(&right.cwd))
+                .then_with(|| left.kind.cmp(&right.kind))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        if record.agents != agents {
+            record.agents = agents;
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn current_herdr_session() -> Result<Option<String>> {
+    let Some(socket) = env::var_os("HERDR_SOCKET_PATH") else {
+        return Ok(None);
+    };
+    let response = herdr_json(&["session", "list", "--json"])?;
+    Ok(response
+        .get("sessions")
+        .and_then(Value::as_array)
+        .and_then(|sessions| {
+            sessions.iter().find_map(|session| {
+                (session.get("socket_path").and_then(Value::as_str) == socket.to_str())
+                    .then(|| {
+                        session
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .flatten()
+            })
+        }))
+}
+
+fn check_dock_session(record: &DockRecord, current: Option<&str>) -> Result<()> {
+    if let Some(expected) = record.herdr_session.as_deref()
+        && current != Some(expected)
+    {
+        return Err(message(format!(
+            "dock belongs to Herdr session {expected}; reopen it from that session"
+        )));
+    }
+    Ok(())
+}
+
+fn reopen_dock(
+    state: &mut State,
+    index: usize,
+    state_path: &Path,
+    current_session: Option<&str>,
+) -> Result<Vec<String>> {
+    check_dock_session(&state.docks[index], current_session)?;
+    if !state.docks[index].root.is_dir() {
+        return Err(message(format!(
+            "dock root is missing: {}",
+            state.docks[index].root.display()
+        )));
+    }
+    for repository in &state.docks[index].repositories {
+        if !repository.worktree.is_dir() {
+            return Err(message(format!(
+                "worktree is missing: {}",
+                repository.worktree.display()
+            )));
+        }
+    }
+
+    let dock_tabs = if state.docks[index].tabs.is_empty() {
+        default_dock_tabs(&state.docks[index].root, &state.docks[index].repositories)
+    } else {
+        state.docks[index].tabs.clone()
+    };
+    for tab in &dock_tabs {
+        if !tab.cwd.is_dir() {
+            return Err(message(format!(
+                "tab directory is missing: {}",
+                tab.cwd.display()
+            )));
+        }
+    }
+    let opened = open_workspace(&state.docks[index].name, &dock_tabs)?;
+    let previous_workspace_id =
+        std::mem::replace(&mut state.docks[index].workspace_id, opened.id.clone());
+    let previous_completed = state.docks[index].completed_at_unix.take();
+    let previous_session = state.docks[index].herdr_session.clone();
+    let previous_tabs = std::mem::replace(&mut state.docks[index].tabs, dock_tabs);
+    if let Some(session) = current_session {
+        state.docks[index].herdr_session = Some(session.into());
+    }
+    if let Err(error) = save_state(state_path, state) {
+        state.docks[index].workspace_id = previous_workspace_id;
+        state.docks[index].completed_at_unix = previous_completed;
+        state.docks[index].herdr_session = previous_session;
+        state.docks[index].tabs = previous_tabs;
+        let _ = herdr(&["workspace", "close", &opened.id]);
+        return Err(error);
+    }
+
+    let errors = resume_agents(&state.docks[index], &opened);
+    herdr(&["workspace", "focus", &opened.id])?;
+    Ok(errors)
 }
 
 fn create_dock() -> Result<()> {
@@ -615,6 +1056,7 @@ fn create_dock() -> Result<()> {
     let state_path = state_dir.join("state.json");
     let config = load_config(&config_path)?;
     let mut state = load_state(&state_path)?;
+    let herdr_session = current_herdr_session()?;
     let mut repositories = load_repositories(&config.repositories)?;
     merge_recent_repositories(&mut repositories, &state.recent_repositories);
     if repositories.is_empty() && config.repository_search_roots.is_empty() {
@@ -676,7 +1118,18 @@ fn create_dock() -> Result<()> {
 
     println!("Creating {branch} in {}...", root.display());
     let worktrees = materialize_worktrees(config.worktree_manager, &root, &name, &branch, &plans)?;
-    let workspace_id = open_workspace(&name, &root, &plans, &worktrees)?;
+    let dock_repositories = plans
+        .iter()
+        .zip(&worktrees)
+        .map(|(plan, worktree)| DockRepository {
+            name: plan.repository.name.clone(),
+            source: plan.repository.path.clone(),
+            worktree: worktree.clone(),
+            base_ref: plan.base_ref.clone(),
+        })
+        .collect::<Vec<_>>();
+    let dock_tabs = default_dock_tabs(&root, &dock_repositories);
+    let workspace = open_workspace(&name, &dock_tabs)?;
 
     for plan in &plans {
         state
@@ -694,22 +1147,18 @@ fn create_dock() -> Result<()> {
         slug,
         branch,
         root: root.clone(),
-        workspace_id,
+        workspace_id: workspace.id.clone(),
+        herdr_session,
         created_at_unix: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+        completed_at_unix: None,
         archived_at_unix: None,
         worktree_manager: config.worktree_manager,
-        repositories: plans
-            .iter()
-            .zip(&worktrees)
-            .map(|(plan, worktree)| DockRepository {
-                name: plan.repository.name.clone(),
-                source: plan.repository.path.clone(),
-                worktree: worktree.clone(),
-                base_ref: plan.base_ref.clone(),
-            })
-            .collect(),
+        agents: Vec::new(),
+        tabs: dock_tabs,
+        repositories: dock_repositories,
     });
     save_state(&state_path, &state)?;
+    herdr(&["workspace", "focus", &workspace.id])?;
     println!("Created dock {name}.");
     Ok(())
 }
@@ -750,102 +1199,134 @@ fn prompt_repositories(
     search_roots: &[PathBuf],
 ) -> Result<Option<RepositorySelection>> {
     let mut repositories = repositories.to_vec();
-    let mut cursor: usize = 0;
     let mut selected = vec![false; repositories.len()];
+    let mut query = String::new();
+    let mut cursor = 0;
     let mut preset_name = None;
     let mut recent = Vec::new();
     let mut discovered = None;
     loop {
-        let height = terminal::size()?.1.saturating_sub(8) as usize;
-        let visible = height.max(1).min(repositories.len().max(1));
-        let start = cursor.saturating_sub(visible.saturating_sub(1));
-        let mut lines = if repositories.is_empty() {
-            vec!["No repositories yet. Press A to find one.".into()]
+        let quick_matches = if query.is_empty() {
+            repositories.iter().collect::<Vec<_>>()
         } else {
-            repositories[start..start + visible]
-                .iter()
-                .enumerate()
-                .map(|(offset, repository)| {
-                    let index = start + offset;
-                    format!(
-                        "{} [{}] {}  {}",
-                        if index == cursor { ">" } else { " " },
-                        if selected[index] { "x" } else { " " },
-                        repository.name,
-                        repository.path.display()
-                    )
+            ranked_repositories(&query, &repositories)
+        };
+        let found_matches = if query.is_empty() {
+            Vec::new()
+        } else {
+            ranked_repositories(&query, discovered.as_deref().unwrap_or_default())
+                .into_iter()
+                .filter(|repository| {
+                    !repositories
+                        .iter()
+                        .any(|existing| existing.path == repository.path)
                 })
                 .collect::<Vec<_>>()
         };
+        let choices = quick_matches
+            .into_iter()
+            .map(|repository| (true, repository))
+            .chain(
+                found_matches
+                    .into_iter()
+                    .map(|repository| (false, repository)),
+            )
+            .collect::<Vec<_>>();
+        cursor = cursor.min(choices.len().saturating_sub(1));
+        let height = terminal::size()?.1.saturating_sub(9) as usize;
+        let visible = height.max(1).min(choices.len().max(1));
+        let start = cursor.saturating_sub(visible.saturating_sub(1));
+        let mut lines = vec![format!("Search: > {query}"), String::new()];
+        if choices.is_empty() {
+            lines.push(if query.is_empty() {
+                "Type to search configured roots.".into()
+            } else {
+                "No matches.".into()
+            });
+        } else {
+            lines.extend(choices[start..start + visible].iter().enumerate().map(
+                |(offset, (quick, repository))| {
+                    let is_selected = *quick
+                        && repositories
+                            .iter()
+                            .position(|existing| existing.path == repository.path)
+                            .is_some_and(|index| selected[index]);
+                    format!(
+                        "{} [{}] {}  {}  ({})",
+                        if start + offset == cursor { ">" } else { " " },
+                        if is_selected { "x" } else { " " },
+                        repository.name,
+                        repository.path.display(),
+                        if *quick { "quick" } else { "found" }
+                    )
+                },
+            ));
+        }
         if let Some(name) = &preset_name {
             lines.push(format!("Save as preset: {name}"));
         }
         lines.push(String::new());
-        let mut help = "↑/↓ move · Space select".to_owned();
-        if !search_roots.is_empty() {
-            help.push_str(" · A find repository");
-        }
+        lines.push(
+            "Type to search · ↑/↓ move · Enter add/continue · Space select · Esc clear/cancel"
+                .into(),
+        );
         if !presets.is_empty() {
-            help.push_str(" · P load preset");
+            lines.push("Shift+P load preset · Shift+S save preset".into());
         }
-        help.push_str(" · S save preset · Enter continue · Esc cancel");
-        lines.push(help);
         ui.frame("Create dock · repositories", &lines)?;
         match read_key()?.code {
-            KeyCode::Esc => return Ok(None),
-            KeyCode::Up if !repositories.is_empty() => cursor = cursor.saturating_sub(1),
-            KeyCode::Down if !repositories.is_empty() => {
-                cursor = (cursor + 1).min(repositories.len() - 1)
+            KeyCode::Esc if !query.is_empty() => {
+                query.clear();
+                cursor = 0;
             }
-            KeyCode::Char(' ') if !repositories.is_empty() => selected[cursor] = !selected[cursor],
-            KeyCode::Char('a') | KeyCode::Char('A') if !search_roots.is_empty() => {
-                if discovered.is_none() {
-                    ui.frame(
-                        "Create dock · find repository",
-                        &["Scanning configured roots…".into()],
-                    )?;
-                    discovered = Some(discover_repositories(search_roots)?);
+            KeyCode::Esc => return Ok(None),
+            KeyCode::Up => cursor = cursor.saturating_sub(1),
+            KeyCode::Down if !choices.is_empty() => cursor = (cursor + 1).min(choices.len() - 1),
+            KeyCode::Char(' ') if query.is_empty() && !choices.is_empty() => {
+                selected[cursor] = !selected[cursor]
+            }
+            KeyCode::Char('P') if query.is_empty() && !presets.is_empty() => {
+                if let Some(preset) = prompt_preset(ui, presets)? {
+                    selected = selection_for_preset(&repositories, &preset);
+                    preset_name = None;
+                    cursor = 0;
                 }
-                let candidates = discovered.as_deref().unwrap_or_default();
-                if candidates.is_empty() {
-                    show_notice(ui, "No repositories found", "Check repository_search_roots")?;
-                } else if let Some(repository) = prompt_repository_search(ui, candidates)? {
+            }
+            KeyCode::Char('S') if query.is_empty() && selected.iter().any(|value| *value) => {
+                preset_name = prompt_text(ui, "Create dock · preset name")?;
+            }
+            KeyCode::Enter if !query.is_empty() && !choices.is_empty() => {
+                let (quick, repository) = (choices[cursor].0, choices[cursor].1.clone());
+                if quick {
                     if let Some(index) = repositories
                         .iter()
                         .position(|existing| existing.path == repository.path)
                     {
-                        cursor = index;
                         selected[index] = true;
-                    } else if repositories
-                        .iter()
-                        .any(|existing| existing.name == repository.name)
-                    {
-                        show_notice(
-                            ui,
-                            "Repository name conflict",
-                            &format!(
-                                "{} is already used; configure an explicit name",
-                                repository.name
-                            ),
-                        )?;
-                    } else {
-                        recent.push(repository.path.clone());
-                        repositories.push(repository);
-                        selected.push(true);
-                        cursor = repositories.len() - 1;
+                        query.clear();
+                        cursor = index;
                     }
+                } else if repositories
+                    .iter()
+                    .any(|existing| existing.name == repository.name)
+                {
+                    show_notice(
+                        ui,
+                        "Repository name conflict",
+                        &format!(
+                            "{} is already used; configure an explicit name",
+                            repository.name
+                        ),
+                    )?;
+                } else {
+                    recent.push(repository.path.clone());
+                    repositories.push(repository);
+                    selected.push(true);
+                    query.clear();
+                    cursor = repositories.len() - 1;
                 }
             }
-            KeyCode::Char('p') | KeyCode::Char('P') if !presets.is_empty() => {
-                if let Some(preset) = prompt_preset(ui, presets)? {
-                    selected = selection_for_preset(&repositories, &preset);
-                    preset_name = None;
-                }
-            }
-            KeyCode::Char('s') | KeyCode::Char('S') if selected.iter().any(|value| *value) => {
-                preset_name = prompt_text(ui, "Create dock · preset name")?;
-            }
-            KeyCode::Enter if selected.iter().any(|value| *value) => {
+            KeyCode::Enter if query.is_empty() && selected.iter().any(|value| *value) => {
                 let chosen = repositories
                     .iter()
                     .zip(&selected)
@@ -861,55 +1342,23 @@ fn prompt_repositories(
                 });
                 return Ok(Some((chosen, preset, recent)));
             }
-            _ => {}
-        }
-    }
-}
-
-fn prompt_repository_search(
-    ui: &mut Ui,
-    repositories: &[Repository],
-) -> Result<Option<Repository>> {
-    let mut query = String::new();
-    let mut cursor = 0;
-    loop {
-        let matches = ranked_repositories(&query, repositories);
-        cursor = cursor.min(matches.len().saturating_sub(1));
-        let height = terminal::size()?.1.saturating_sub(8) as usize;
-        let visible = height.max(1).min(matches.len().max(1));
-        let start = cursor.saturating_sub(visible.saturating_sub(1));
-        let mut lines = vec![format!("> {query}"), String::new()];
-        if matches.is_empty() {
-            lines.push("No matches.".into());
-        } else {
-            lines.extend(matches[start..start + visible].iter().enumerate().map(
-                |(offset, repository)| {
-                    format!(
-                        "{} {}  {}",
-                        if start + offset == cursor { ">" } else { " " },
-                        repository.name,
-                        repository.path.display()
-                    )
-                },
-            ));
-        }
-        lines.extend([
-            String::new(),
-            "Type to search · ↑/↓ move · Enter add · Esc back".into(),
-        ]);
-        ui.frame("Create dock · find repository", &lines)?;
-        match read_key()?.code {
-            KeyCode::Esc => return Ok(None),
-            KeyCode::Up => cursor = cursor.saturating_sub(1),
-            KeyCode::Down if !matches.is_empty() => cursor = (cursor + 1).min(matches.len() - 1),
-            KeyCode::Enter if !matches.is_empty() => return Ok(Some(matches[cursor].clone())),
-            KeyCode::Backspace => {
+            KeyCode::Backspace if !query.is_empty() => {
                 query.pop();
                 cursor = 0;
             }
             KeyCode::Char(character) => {
                 query.push(character);
                 cursor = 0;
+                if discovered.is_none() && !search_roots.is_empty() {
+                    ui.frame(
+                        "Create dock · repositories",
+                        &[
+                            format!("Search: > {query}"),
+                            "Scanning configured roots…".into(),
+                        ],
+                    )?;
+                    discovered = Some(discover_repositories(search_roots)?);
+                }
             }
             _ => {}
         }
@@ -934,6 +1383,23 @@ fn ranked_repositories<'a>(query: &str, repositories: &'a [Repository]) -> Vec<&
     matches
         .into_iter()
         .map(|(_, repository)| repository)
+        .collect()
+}
+
+fn ranked_refs<'a>(query: &str, refs: &'a [String]) -> Vec<&'a String> {
+    if query.is_empty() {
+        return refs.iter().collect();
+    }
+    let mut matches = refs
+        .iter()
+        .filter_map(|reference| Some((fuzzy_score(query, reference)?, reference)))
+        .collect::<Vec<_>>();
+    matches.sort_by(|(left_score, left), (right_score, right)| {
+        left_score.cmp(right_score).then_with(|| left.cmp(right))
+    });
+    matches
+        .into_iter()
+        .map(|(_, reference)| reference)
         .collect()
 }
 
@@ -1044,29 +1510,51 @@ fn prompt_base_ref(
     refs: &[String],
     initial: &str,
 ) -> Result<Option<String>> {
-    let mut cursor = refs.iter().position(|value| value == initial).unwrap_or(0);
+    let initial_cursor = refs.iter().position(|value| value == initial).unwrap_or(0);
+    let mut query = String::new();
+    let mut cursor = initial_cursor;
     loop {
-        let height = terminal::size()?.1.saturating_sub(7) as usize;
-        let visible = height.max(1).min(refs.len());
+        let matches = ranked_refs(&query, refs);
+        cursor = cursor.min(matches.len().saturating_sub(1));
+        let height = terminal::size()?.1.saturating_sub(9) as usize;
+        let visible = height.max(1).min(matches.len().max(1));
         let start = cursor.saturating_sub(visible.saturating_sub(1));
-        let mut lines = refs[start..start + visible]
-            .iter()
-            .enumerate()
-            .map(|(offset, reference)| {
-                format!(
-                    "{} {}",
-                    if start + offset == cursor { ">" } else { " " },
-                    reference
-                )
-            })
-            .collect::<Vec<_>>();
-        lines.extend([String::new(), "↑/↓ move · Enter select · Esc cancel".into()]);
+        let mut lines = vec![format!("Search: > {query}"), String::new()];
+        if matches.is_empty() {
+            lines.push("No matches.".into());
+        } else {
+            lines.extend(matches[start..start + visible].iter().enumerate().map(
+                |(offset, reference)| {
+                    format!(
+                        "{} {}",
+                        if start + offset == cursor { ">" } else { " " },
+                        reference
+                    )
+                },
+            ));
+        }
+        lines.extend([
+            String::new(),
+            "Type to search · ↑/↓ move · Enter select · Esc clear/cancel".into(),
+        ]);
         ui.frame(&format!("Create dock · base ref for {repository}"), &lines)?;
         match read_key()?.code {
+            KeyCode::Esc if !query.is_empty() => {
+                query.clear();
+                cursor = initial_cursor;
+            }
             KeyCode::Esc => return Ok(None),
             KeyCode::Up => cursor = cursor.saturating_sub(1),
-            KeyCode::Down => cursor = (cursor + 1).min(refs.len() - 1),
-            KeyCode::Enter => return Ok(Some(refs[cursor].clone())),
+            KeyCode::Down if !matches.is_empty() => cursor = (cursor + 1).min(matches.len() - 1),
+            KeyCode::Enter if !matches.is_empty() => return Ok(Some(matches[cursor].clone())),
+            KeyCode::Backspace if !query.is_empty() => {
+                query.pop();
+                cursor = if query.is_empty() { initial_cursor } else { 0 };
+            }
+            KeyCode::Char(character) => {
+                query.push(character);
+                cursor = 0;
+            }
             _ => {}
         }
     }
@@ -1420,51 +1908,227 @@ fn write_agent_guides(
     Ok(())
 }
 
-fn open_workspace(
-    name: &str,
-    root: &Path,
-    plans: &[RepositoryPlan],
-    worktrees: &[PathBuf],
-) -> Result<String> {
-    let first_cwd = if plans.len() == 1 {
-        &worktrees[0]
-    } else {
-        root
-    };
+fn default_dock_tabs(root: &Path, repositories: &[DockRepository]) -> Vec<DockTab> {
+    if repositories.len() == 1 {
+        return vec![DockTab {
+            label: repositories[0].name.clone(),
+            cwd: repositories[0].worktree.clone(),
+        }];
+    }
+    let mut tabs = vec![DockTab {
+        label: "shared".into(),
+        cwd: root.to_path_buf(),
+    }];
+    tabs.extend(repositories.iter().map(|repository| DockTab {
+        label: repository.name.clone(),
+        cwd: repository.worktree.clone(),
+    }));
+    tabs
+}
+
+fn open_workspace(name: &str, dock_tabs: &[DockTab]) -> Result<OpenedWorkspace> {
+    let first = dock_tabs
+        .first()
+        .ok_or_else(|| message("dock must have at least one tab"))?;
     let response = herdr_json(&[
         "workspace",
         "create",
         "--cwd",
-        &first_cwd.to_string_lossy(),
+        &first.cwd.to_string_lossy(),
         "--label",
         name,
         "--no-focus",
     ])?;
     let workspace_id = json_string(&response, "/result/workspace/workspace_id")?;
-    let first_tab_id = json_string(&response, "/result/tab/tab_id")?;
-    let first_label = if plans.len() == 1 {
-        plans[0].repository.name.as_str()
-    } else {
-        "shared"
-    };
-    herdr(&["tab", "rename", &first_tab_id, first_label])?;
-    if plans.len() > 1 {
-        for (plan, worktree) in plans.iter().zip(worktrees) {
-            herdr(&[
+    let setup = (|| -> Result<Vec<OpenedTab>> {
+        let first_tab_id = json_string(&response, "/result/tab/tab_id")?;
+        let first_pane_id = json_string(&response, "/result/root_pane/pane_id")?;
+        herdr(&["tab", "rename", &first_tab_id, &first.label])?;
+        let mut tabs = vec![OpenedTab {
+            cwd: first.cwd.clone(),
+            root_pane_id: first_pane_id,
+        }];
+        for tab in &dock_tabs[1..] {
+            let response = herdr_json(&[
                 "tab",
                 "create",
                 "--workspace",
                 &workspace_id,
                 "--cwd",
-                &worktree.to_string_lossy(),
+                &tab.cwd.to_string_lossy(),
                 "--label",
-                &plan.repository.name,
+                &tab.label,
                 "--no-focus",
             ])?;
+            tabs.push(OpenedTab {
+                cwd: tab.cwd.clone(),
+                root_pane_id: json_string(&response, "/result/root_pane/pane_id")?,
+            });
+        }
+        Ok(tabs)
+    })();
+    match setup {
+        Ok(tabs) => Ok(OpenedWorkspace {
+            id: workspace_id,
+            tabs,
+        }),
+        Err(error) => {
+            if let Err(close_error) = herdr(&["workspace", "close", &workspace_id]) {
+                return Err(message(format!(
+                    "{error}; also failed to close partial workspace: {close_error}"
+                )));
+            }
+            Err(error)
         }
     }
-    herdr(&["workspace", "focus", &workspace_id])?;
-    Ok(workspace_id)
+}
+
+fn resume_agents(record: &DockRecord, workspace: &OpenedWorkspace) -> Vec<String> {
+    let mut errors = Vec::new();
+    let mut occupied_tabs = BTreeSet::new();
+    for (index, agent) in record.agents.iter().enumerate() {
+        let Some(resume_arguments) = agent_resume_arguments(agent) else {
+            errors.push(format!(
+                "{} has no supported resumable session",
+                agent.name.as_deref().unwrap_or(&agent.kind)
+            ));
+            continue;
+        };
+        let tab_index = agent
+            .tab
+            .filter(|index| *index < workspace.tabs.len())
+            .or_else(|| {
+                workspace
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, tab)| agent.cwd.starts_with(&tab.cwd))
+                    .max_by_key(|(_, tab)| tab.cwd.components().count())
+                    .map(|(index, _)| index)
+            });
+        let Some(tab_index) = tab_index else {
+            errors.push(format!("{} has no matching dock tab", agent.cwd.display()));
+            continue;
+        };
+        let tab = &workspace.tabs[tab_index];
+        let pane_id = if !occupied_tabs.contains(&tab_index) && agent.cwd == tab.cwd {
+            occupied_tabs.insert(tab_index);
+            Ok(tab.root_pane_id.clone())
+        } else {
+            let response = herdr_json(&[
+                "pane",
+                "split",
+                &tab.root_pane_id,
+                "--direction",
+                "right",
+                "--cwd",
+                &agent.cwd.to_string_lossy(),
+                "--no-focus",
+            ]);
+            response.and_then(|response| json_string(&response, "/result/pane/pane_id"))
+        };
+        let pane_id = match pane_id {
+            Ok(pane_id) => pane_id,
+            Err(error) => {
+                errors.push(format!("{}: {error}", agent.cwd.display()));
+                continue;
+            }
+        };
+        let name = agent_launch_name(record, agent, index);
+        let mut arguments = vec![
+            "agent".into(),
+            "start".into(),
+            name.clone(),
+            "--kind".into(),
+            agent.kind.clone(),
+            "--pane".into(),
+            pane_id,
+            "--".into(),
+        ];
+        arguments.extend(resume_arguments);
+        let references = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+        if let Err(error) = herdr(&references) {
+            errors.push(format!("{name}: {error}"));
+        }
+    }
+    errors
+}
+
+fn agent_launch_name(record: &DockRecord, agent: &DockAgent, index: usize) -> String {
+    if let Some(name) = agent.name.as_ref().filter(|name| valid_agent_name(name)) {
+        return name.clone();
+    }
+    let mut base = format!(
+        "dock-{}-{}",
+        record
+            .slug
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+            .collect::<String>(),
+        agent
+            .kind
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+            .collect::<String>()
+    );
+    let suffix = format!("-{}", index + 1);
+    base.truncate(32 - suffix.len());
+    base.push_str(&suffix);
+    base
+}
+
+fn valid_agent_name(name: &str) -> bool {
+    name.len() <= 32
+        && name.starts_with(|character: char| character.is_ascii_lowercase())
+        && name.chars().all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '_' | '-')
+        })
+}
+
+fn agent_resume_arguments(agent: &DockAgent) -> Option<Vec<String>> {
+    let session = agent.session.as_ref()?;
+    if session.agent != agent.kind
+        || session.value.is_empty()
+        || session.value.chars().any(char::is_control)
+    {
+        return None;
+    }
+    match session.kind.as_str() {
+        "id" if session.value.len() > 512 => return None,
+        "path" if session.value.len() > 4096 || !Path::new(&session.value).is_absolute() => {
+            return None;
+        }
+        "id" | "path" => {}
+        _ => return None,
+    }
+
+    let value = session.value.clone();
+    match (
+        session.source.as_str(),
+        agent.kind.as_str(),
+        session.kind.as_str(),
+    ) {
+        ("herdr:claude", "claude", "id") => Some(vec!["--resume".into(), value]),
+        ("herdr:codex", "codex", "id") => Some(vec!["resume".into(), value]),
+        ("herdr:copilot", "copilot", "id") => Some(vec![format!("--resume={value}")]),
+        ("herdr:devin", "devin", "id")
+        | ("herdr:droid", "droid", "id")
+        | ("herdr:hermes", "hermes", "id")
+        | ("herdr:qodercli", "qodercli", "id")
+        | ("herdr:qwen", "qwen", "id")
+        | ("herdr:grok", "grok", "id") => Some(vec!["--resume".into(), value]),
+        ("herdr:kimi", "kimi", "id")
+        | ("herdr:opencode", "opencode", "id")
+        | ("herdr:kilo", "kilo", "id") => Some(vec!["--session".into(), value]),
+        ("herdr:mastracode", "mastracode", "id") => Some(vec!["--thread".into(), value]),
+        ("herdr:pi", "pi", "id" | "path") => Some(vec!["--session".into(), value]),
+        ("herdr:omp", "omp", "id" | "path") => Some(vec![format!("--resume={value}")]),
+        ("herdr:cursor", "cursor", "id") => Some(vec!["--resume".into(), value]),
+        ("herdr:antigravity_cli", "agy", "id") => Some(vec!["--conversation".into(), value]),
+        _ => None,
+    }
 }
 
 fn repository_key(path: &Path) -> String {
@@ -1586,6 +2250,92 @@ mod tests {
             r#"{"name":"x","slug":"x","branch":"agent/x","root":"/tmp/x","workspace_id":"x","created_at_unix":1,"repositories":[]}"#,
         )?;
         assert_eq!(old_record.worktree_manager, WorktreeManager::Git);
+        assert!(old_record.herdr_session.is_none());
+        assert!(old_record.completed_at_unix.is_none());
+        assert!(old_record.agents.is_empty());
+        assert!(old_record.tabs.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn persists_resumable_agent_sessions() -> Result<()> {
+        let temporary = env::temp_dir().join(format!(
+            "herdr-dock-agent-state-test-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        fs::create_dir_all(&temporary)?;
+        let workspace_response = serde_json::json!({
+            "result": {"workspaces": [{"workspace_id": "w1", "agent_status": "idle"}]}
+        });
+        let agent_response = serde_json::json!({
+            "result": {"agents": [{
+                "workspace_id": "w1",
+                "name": "reviewer",
+                "agent": "codex",
+                "agent_status": "idle",
+                "tab_id": "t1",
+                "foreground_cwd": temporary,
+                "agent_session": {
+                    "source": "herdr:codex",
+                    "agent": "codex",
+                    "kind": "id",
+                    "value": "session-123"
+                }
+            }]}
+        });
+        let tab_response = serde_json::json!({
+            "result": {"tabs": [{"workspace_id": "w1", "tab_id": "t1", "label": "work", "number": 1}]}
+        });
+        let pane_response = serde_json::json!({
+            "result": {"panes": [{"tab_id": "t1", "cwd": temporary}]}
+        });
+        let live = parse_live_workspaces(
+            &workspace_response,
+            &tab_response,
+            &pane_response,
+            &agent_response,
+        );
+        let mut state = State::default();
+        state.docks.push(DockRecord {
+            name: "Test dock".into(),
+            slug: "test_dock".into(),
+            branch: "agent/test_dock".into(),
+            root: temporary.clone(),
+            workspace_id: "w1".into(),
+            herdr_session: Some("default".into()),
+            created_at_unix: 1,
+            completed_at_unix: None,
+            archived_at_unix: None,
+            worktree_manager: WorktreeManager::Git,
+            agents: Vec::new(),
+            tabs: Vec::new(),
+            repositories: Vec::new(),
+        });
+
+        check_dock_session(&state.docks[0], Some("default"))?;
+        assert!(check_dock_session(&state.docks[0], Some("other")).is_err());
+        assert!(check_dock_session(&state.docks[0], None).is_err());
+
+        assert!(sync_dock_agents(&mut state.docks, &live));
+        assert!(!sync_dock_agents(&mut state.docks, &live));
+        assert_eq!(state.docks[0].tabs[0].label, "work");
+        assert_eq!(state.docks[0].agents[0].tab, Some(0));
+        assert_eq!(
+            agent_resume_arguments(&state.docks[0].agents[0]),
+            Some(vec!["resume".into(), "session-123".into()])
+        );
+        state.docks[0].completed_at_unix = Some(2);
+        let overview = build_overview(&state.docks, &BTreeMap::new());
+        assert_eq!(overview[0].status, "done");
+        assert_eq!(overview[0].agents[0].status, "done");
+
+        let state_path = temporary.join("state.json");
+        save_state(&state_path, &state)?;
+        let loaded = load_state(&state_path)?;
+        assert_eq!(loaded.docks[0].agents, state.docks[0].agents);
+        assert!(!temporary.join("state.json.tmp").exists());
+        fs::remove_dir_all(temporary)?;
         Ok(())
     }
 
@@ -1610,6 +2360,10 @@ mod tests {
             "web-client"
         );
         assert!(ranked_repositories("missing", &repositories).is_empty());
+
+        let refs = ["HEAD", "main", "origin/main", "feature/search"].map(str::to_owned);
+        assert_eq!(ranked_refs("fs", &refs)[0], "feature/search");
+        assert!(ranked_refs("missing", &refs).is_empty());
 
         let mut recent = vec![api.canonicalize()?];
         remember_repository(&mut recent, web.canonicalize()?);
@@ -1692,9 +2446,13 @@ mod tests {
             branch: "agent/oauth_login".into(),
             root: root.clone(),
             workspace_id: "workspace-1".into(),
+            herdr_session: None,
             created_at_unix: 1,
+            completed_at_unix: None,
             archived_at_unix: None,
             worktree_manager: WorktreeManager::Git,
+            agents: Vec::new(),
+            tabs: Vec::new(),
             repositories: plans
                 .iter()
                 .zip(&worktrees)
@@ -1712,9 +2470,14 @@ mod tests {
                 status: "working".into(),
                 agents: vec![AgentOverview {
                     name: "shared".into(),
+                    kind: "pi".into(),
                     status: "working".into(),
                     cwd: root.to_string_lossy().into(),
+                    tab_id: None,
+                    launch_name: None,
+                    session: None,
                 }],
+                tabs: Vec::new(),
             },
         )]);
         let overview = build_overview(std::slice::from_ref(&record), &live);
