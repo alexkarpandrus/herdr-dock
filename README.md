@@ -59,14 +59,14 @@ The overview refreshes this metadata from Herdr. Enter focuses a live workspace.
 # 1. Install — downloads the repository, builds with Cargo, or fetches a prebuilt binary
 herdr plugin install alexkarpandrus/herdr-dock
 
-# 2. Add repositories — the config file is created on your first run
+# 2. Optional — add explicit repositories; the first run prompts for a search directory
 ${EDITOR:-vi} "$(herdr plugin config-dir herdr-dock)/config.toml"
 
 # 3. Try it, then bind hotkeys (see below)
 herdr plugin action invoke create --plugin herdr-dock
 ```
 
-The first create run writes a `config.toml` template and prints a pointer to it. Add repositories or search roots there, then run the create action again.
+The first create run writes a `config.toml` template, then prompts for a directory to scan and records it as a `repository_search_roots` entry. You can also edit the file to add explicit `[[repositories]]` blocks or more search roots.
 
 Requirements:
 
@@ -116,7 +116,7 @@ path = "~/src/web"
 
 The optional `name` becomes the worktree directory and tab label. Repository names must be unique.
 
-`repository_search_roots` enables fuzzy repository search directly in the repository picker. The saved quick list stays at the top. Start typing to filter it and show matching Git repositories from the configured roots below. Press Enter to add a search result. Herdr Dock saves it in the quick list for next time.
+`repository_search_roots` enables fuzzy repository search directly in the repository picker. The saved quick list stays at the top. Start typing to filter it and show matching Git repositories from the configured roots below. Press Space to select a search result, then Enter to continue. Herdr Dock saves it in the quick list for next time.
 
 The base-ref picker also filters branches and remote refs as you type.
 

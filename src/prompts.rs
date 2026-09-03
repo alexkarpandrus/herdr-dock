@@ -1,17 +1,18 @@
-use crate::Result;
 use crate::git::message;
 use crate::model::{Preset, Repository, RepositorySelection};
-use crate::repos::{discover_repositories_with_progress, repository_key};
-use crate::ui::{BaseRefChoice, Line, LineAction, Ui, read_key, show_notice, slugify};
+use crate::repos::{discover_repositories_with_progress, expand_home, repository_key};
+use crate::ui::{read_key, show_notice, slugify, BaseRefChoice, Line, LineAction, Ui};
+use crate::Result;
 use crossterm::event::{self, KeyCode};
 use crossterm::terminal;
 use std::{
     collections::BTreeSet,
-    path::PathBuf,
+    env,
+    path::{Path, PathBuf},
+    process::Command,
     sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
-        mpsc,
+        mpsc, Arc,
     },
     thread,
     time::Duration,
@@ -153,8 +154,7 @@ pub(crate) fn prompt_repositories(
         }
         lines.push(String::new());
         lines.push(
-            "Type to search · ↑/↓ move · Enter add/continue · Space select · Esc clear/cancel"
-                .into(),
+            "Type to search · ↑/↓ move · Space select · Enter continue · Esc clear/cancel".into(),
         );
         if !presets.is_empty() {
             lines.push("Shift+P load preset · Shift+S save preset".into());
@@ -181,29 +181,14 @@ pub(crate) fn prompt_repositories(
             KeyCode::Esc => return Ok(None),
             KeyCode::Up => cursor = cursor.saturating_sub(1),
             KeyCode::Down if !choices.is_empty() => cursor = (cursor + 1).min(choices.len() - 1),
-            KeyCode::Char(' ') if query.text.is_empty() && !choices.is_empty() => {
-                selected[cursor] = !selected[cursor]
-            }
-            KeyCode::Char('P') if query.text.is_empty() && !presets.is_empty() => {
-                if let Some(preset) = prompt_preset(ui, presets)? {
-                    selected = selection_for_preset(&repositories, &preset);
-                    preset_name = None;
-                    cursor = 0;
-                }
-            }
-            KeyCode::Char('S') if query.text.is_empty() && selected.iter().any(|value| *value) => {
-                preset_name = prompt_text(ui, "Create dock · preset name")?;
-            }
-            KeyCode::Enter if !query.text.is_empty() && !choices.is_empty() => {
+            KeyCode::Char(' ') if !choices.is_empty() => {
                 let (quick, repository) = (choices[cursor].0, choices[cursor].1.clone());
                 if quick {
                     if let Some(index) = repositories
                         .iter()
                         .position(|existing| existing.path == repository.path)
                     {
-                        selected[index] = true;
-                        query.clear();
-                        cursor = index;
+                        selected[index] = !selected[index];
                     }
                 } else if repositories
                     .iter()
@@ -225,7 +210,17 @@ pub(crate) fn prompt_repositories(
                     cursor = repositories.len() - 1;
                 }
             }
-            KeyCode::Enter if query.text.is_empty() && selected.iter().any(|value| *value) => {
+            KeyCode::Char('P') if query.text.is_empty() && !presets.is_empty() => {
+                if let Some(preset) = prompt_preset(ui, presets)? {
+                    selected = selection_for_preset(&repositories, &preset);
+                    preset_name = None;
+                    cursor = 0;
+                }
+            }
+            KeyCode::Char('S') if query.text.is_empty() && selected.iter().any(|value| *value) => {
+                preset_name = prompt_text(ui, "Create dock · preset name")?;
+            }
+            KeyCode::Enter if selected.iter().any(|value| *value) => {
                 let chosen = repositories
                     .iter()
                     .zip(&selected)
@@ -363,6 +358,84 @@ pub(crate) fn prompt_text(ui: &mut Ui, title: &str) -> Result<Option<String>> {
         }
     }
 }
+
+pub(crate) fn prompt_directory(ui: &mut Ui, title: &str) -> Result<Option<PathBuf>> {
+    let mut line = Line::with_text(&default_search_root());
+    let mut error: Option<String> = None;
+    loop {
+        let mut lines = vec![
+            "No repositories are configured yet.".into(),
+            String::new(),
+            "Enter a directory to scan for Git repositories, for example ~/Src.".into(),
+        ];
+        if let Some(message) = &error {
+            lines.push(String::new());
+            lines.push(message.clone());
+        }
+        lines.extend([
+            String::new(),
+            format!("> {}", line.display()),
+            String::new(),
+        ]);
+        lines.push("Enter scan · Esc cancel".into());
+        ui.frame(title, &lines)?;
+        match line.handle(&read_key()?) {
+            LineAction::Submit if !line.text.trim().is_empty() => {
+                let raw = PathBuf::from(line.text.trim());
+                match expand_home(&raw) {
+                    Ok(expanded) if expanded.is_dir() => return Ok(Some(expanded)),
+                    Ok(expanded) => {
+                        error = Some(format!("Not a directory: {}", expanded.display()))
+                    }
+                    Err(err) => error = Some(err.to_string()),
+                }
+            }
+            LineAction::Cancel => return Ok(None),
+            _ => {}
+        }
+    }
+}
+
+fn default_search_root() -> String {
+    let home = env::var_os("HOME").map(PathBuf::from);
+    if let Ok(cwd) = env::current_dir() {
+        if let Ok(output) = Command::new("git")
+            .arg("-C")
+            .arg(&cwd)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            && output.status.success()
+        {
+            let top = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+            if let Some(parent) = top.parent() {
+                let parent = parent.to_path_buf();
+                if parent.is_dir() && home.as_deref() != Some(parent.as_path()) {
+                    return parent.display().to_string();
+                }
+            }
+        }
+        if cwd.is_dir() && home.as_deref() != Some(cwd.as_path()) {
+            return cwd.display().to_string();
+        }
+    }
+    for candidate in [
+        "~/Src",
+        "~/src",
+        "~/Code",
+        "~/code",
+        "~/dev",
+        "~/Projects",
+        "~/repos",
+        "~/git",
+    ] {
+        if let Ok(expanded) = expand_home(Path::new(candidate))
+            && expanded.is_dir()
+        {
+            return candidate.to_string();
+        }
+    }
+    "~/Src".to_string()
+}
 pub(crate) fn selection_for_preset(repositories: &[Repository], preset: &Preset) -> Vec<bool> {
     let paths = preset.repositories.iter().cloned().collect::<BTreeSet<_>>();
     repositories
@@ -385,6 +458,7 @@ pub(crate) fn prompt_base_ref(
     repository: &str,
     refs: &[String],
     initial: &str,
+    chosen: &[(String, String)],
 ) -> Result<Option<BaseRefChoice>> {
     let initial_cursor = refs.iter().position(|value| value == initial).unwrap_or(0);
     let mut query = Line::new();
@@ -408,6 +482,12 @@ pub(crate) fn prompt_base_ref(
                     )
                 },
             ));
+        }
+        if !chosen.is_empty() {
+            lines.extend([String::new(), "Chosen:".into()]);
+            for (name, base_ref) in chosen {
+                lines.push(format!("  {name} <- {base_ref}"));
+            }
         }
         lines.extend([
             String::new(),

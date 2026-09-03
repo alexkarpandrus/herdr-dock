@@ -29,10 +29,7 @@ pub(crate) fn load_config(path: &Path) -> Result<Config> {
 # path = "~/src/api"
 "#,
         )?;
-        return Err(message(format!(
-            "created {}; add repositories or repository_search_roots and run the action again",
-            path.display()
-        )));
+        return Ok(Config::default());
     }
     let config: Config = toml::from_str(&fs::read_to_string(path)?)?;
     let prefix = config.branch_prefix.trim_matches('/');
@@ -170,4 +167,23 @@ pub(crate) fn expand_home(path: &Path) -> Result<PathBuf> {
 }
 pub(crate) fn repository_key(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+pub(crate) fn write_search_root(path: &Path, root: &Path) -> Result<()> {
+    let escaped = root
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let mut contents = if path.exists() {
+        fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    contents.push_str(&format!("repository_search_roots = [\"{escaped}\"]\n"));
+    fs::write(path, contents)?;
+    Ok(())
 }

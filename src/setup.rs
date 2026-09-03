@@ -1,6 +1,10 @@
-use crate::Result;
 use crate::git::message;
-use std::{env, fs, path::PathBuf};
+use crate::Result;
+use std::{
+    env, fs,
+    io::{self, IsTerminal},
+    path::PathBuf,
+};
 
 const CREATE_BINDING: &str = r#"
 
@@ -40,37 +44,41 @@ pub(crate) fn setup() -> Result<()> {
     };
 
     let mut config = original.clone();
-    let mut added = false;
+    let mut lines = Vec::new();
     if config.contains("command = \"herdr-dock.create\"") {
-        println!("herdr-dock: prefix+d already bound");
+        lines.push("prefix+d already bound".to_string());
     } else {
         config.push_str(CREATE_BINDING);
-        added = true;
+        lines.push("added prefix+d (create dock)".to_string());
     }
     if config.contains("command = \"herdr-dock.overview\"") {
-        println!("herdr-dock: prefix+o already bound");
+        lines.push("prefix+o already bound".to_string());
     } else {
         config.push_str(OVERVIEW_BINDING);
-        added = true;
+        lines.push("added prefix+o (dock overview)".to_string());
     }
 
-    if !added {
-        println!(
-            "herdr-dock: keybindings already present in {}",
-            path.display()
-        );
-        println!("Reload with: herdr server reload-config");
-        return Ok(());
+    if config == original {
+        lines.push(format!("keybindings already present in {}", path.display()));
+    } else {
+        if path.exists() {
+            let backup = path.with_extension("toml.bak");
+            fs::write(&backup, &original)?;
+            lines.push(format!("backed up config to {}", backup.display()));
+        }
+        fs::write(&path, config)?;
+        lines.push(format!("wrote keybindings to {}", path.display()));
     }
+    lines.push("Reload with: herdr server reload-config".to_string());
+    lines.push("Then press prefix+d to create a dock and prefix+o for the overview.".to_string());
 
-    if path.exists() {
-        let backup = path.with_extension("toml.bak");
-        fs::write(&backup, &original)?;
-        println!("herdr-dock: backed up config to {}", backup.display());
+    if io::stdin().is_terminal() {
+        let mut ui = crate::ui::Ui::start()?;
+        crate::ui::show_notice(&mut ui, "herdr-dock · hotkeys", &lines.join("\n"))?;
+    } else {
+        for line in &lines {
+            println!("herdr-dock: {line}");
+        }
     }
-    fs::write(&path, config)?;
-    println!("herdr-dock: added keybindings to {}", path.display());
-    println!("Reload with: herdr server reload-config");
-    println!("Then press prefix+d to create a dock and prefix+o for the overview.");
     Ok(())
 }

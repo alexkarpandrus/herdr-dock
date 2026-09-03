@@ -4,10 +4,10 @@ use crate::herdr::{current_herdr_session, herdr, open_workspace};
 use crate::model::{
     DockRecord, DockRepository, DockTab, RepositoryPlan, load_state, lock_state, save_state,
 };
-use crate::prompts::{prompt_base_ref, prompt_name, prompt_repositories, upsert_preset};
+use crate::prompts::{prompt_base_ref, prompt_directory, prompt_name, prompt_repositories, upsert_preset};
 use crate::repos::{
     expand_home, load_config, load_repositories, merge_recent_repositories, remember_repository,
-    repository_key, required_directory,
+    repository_key, required_directory, write_search_root,
 };
 use crate::ui::{BaseRefChoice, Ui, confirm_create, slugify};
 use crate::worktrees::WorktreeManager;
@@ -24,16 +24,21 @@ pub(crate) fn create_dock() -> Result<()> {
     let config_path = config_dir.join("config.toml");
     let state_path = state_dir.join("state.json");
     let _state_lock = lock_state(&state_path)?;
-    let config = load_config(&config_path)?;
+    let mut config = load_config(&config_path)?;
     let mut state = load_state(&state_path)?;
     let herdr_session = current_herdr_session()?;
     let mut repositories = load_repositories(&config.repositories)?;
     merge_recent_repositories(&mut repositories, &state.recent_repositories);
     if repositories.is_empty() && config.repository_search_roots.is_empty() {
-        return Err(message(format!(
-            "no repositories configured; add [[repositories]] or repository_search_roots to {}",
-            config_path.display()
-        )));
+        let root = {
+            let mut ui = Ui::start()?;
+            prompt_directory(&mut ui, "Create dock · add a repository search root")?
+        };
+        let Some(root) = root else {
+            return Ok(());
+        };
+        write_search_root(&config_path, &root)?;
+        config = load_config(&config_path)?;
     }
     let worktree_root = config
         .worktree_root
@@ -79,7 +84,13 @@ pub(crate) fn create_dock() -> Result<()> {
                 .cloned()
                 .or_else(|| default_base_ref(&repository.path, &refs))
                 .unwrap_or_else(|| "HEAD".into());
-            let Some(choice) = prompt_base_ref(&mut ui, &repository.name, &refs, &initial)? else {
+            let chosen = plans
+                .iter()
+                .map(|plan| (plan.repository.name.clone(), plan.base_ref.clone()))
+                .collect::<Vec<_>>();
+            let Some(choice) =
+                prompt_base_ref(&mut ui, &repository.name, &refs, &initial, &chosen)?
+            else {
                 return Ok(());
             };
             match choice {

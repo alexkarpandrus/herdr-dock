@@ -22,12 +22,21 @@ pub(crate) type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("herdr-dock: {error}");
-        if io::stdin().is_terminal() {
-            eprintln!("\nPress Enter to close.");
-            let _ = io::stdin().read_line(&mut String::new());
-        }
+        report_error(error.as_ref());
         std::process::exit(1);
+    }
+}
+
+fn report_error(error: &dyn Error) {
+    if io::stdin().is_terminal()
+        && let Ok(mut ui) = crate::ui::Ui::start()
+        && crate::ui::show_notice(&mut ui, "herdr-dock", &error.to_string()).is_ok()
+    {
+        return;
+    }
+    eprintln!("herdr-dock: {error}");
+    if io::stdin().is_terminal() {
+        let _ = io::stdin().read_line(&mut String::new());
     }
 }
 
@@ -310,6 +319,25 @@ mod tests {
             !temporary
                 .join(format!(".state.json.{}.tmp", std::process::id()))
                 .exists()
+        );
+        fs::remove_dir_all(temporary)?;
+        Ok(())
+    }
+
+    #[test]
+    fn writes_search_root_into_config() -> Result<()> {
+        let temporary = env::temp_dir().join(format!(
+            "herdr-dock-search-root-test-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        fs::create_dir_all(&temporary)?;
+        let config_path = temporary.join("config.toml");
+        write_search_root(&config_path, Path::new("/home/user/Src"))?;
+        let config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
+        assert_eq!(
+            config.repository_search_roots,
+            vec![PathBuf::from("/home/user/Src")]
         );
         fs::remove_dir_all(temporary)?;
         Ok(())

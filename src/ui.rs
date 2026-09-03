@@ -61,6 +61,13 @@ impl Line {
         }
     }
 
+    pub(crate) fn with_text(initial: &str) -> Self {
+        Self {
+            cursor: initial.chars().count(),
+            text: initial.to_string(),
+        }
+    }
+
     pub(crate) fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
@@ -263,22 +270,28 @@ impl Drop for Ui {
     }
 }
 pub(crate) fn confirm_archive(ui: &mut Ui, dock: &DockOverview) -> Result<bool> {
-    ui.frame(
-        "Archive/remove dock",
-        &[
-            format!("Dock: {}", dock.name),
-            format!("Worktrees: {}", dock.repositories.len()),
-            String::new(),
-            "This closes the workspace and removes clean worktrees.".into(),
-            "Branches and the archived history record remain.".into(),
-            String::new(),
-            "Y archive/remove · any other key cancel".into(),
-        ],
-    )?;
-    Ok(matches!(
-        read_key()?.code,
-        KeyCode::Char('y') | KeyCode::Char('Y')
-    ))
+    let mut line = Line::new();
+    loop {
+        ui.frame(
+            "Archive/remove dock",
+            &[
+                format!("Dock: {}", dock.name),
+                format!("Worktrees: {}", dock.repositories.len()),
+                String::new(),
+                "This closes the workspace and removes clean worktrees.".into(),
+                "Branches and the archived history record remain.".into(),
+                String::new(),
+                format!("> {}", line.display()),
+                String::new(),
+                "Type `yes` to archive/remove · Esc cancel".into(),
+            ],
+        )?;
+        match line.handle(&read_key()?) {
+            LineAction::Submit => return Ok(line.text.trim().eq_ignore_ascii_case("yes")),
+            LineAction::Cancel => return Ok(false),
+            _ => {}
+        }
+    }
 }
 pub(crate) fn confirm_complete(ui: &mut Ui, dock: &DockOverview) -> Result<bool> {
     ui.frame(
@@ -314,7 +327,7 @@ pub(crate) fn confirm_create(
     for plan in plans {
         lines.push(format!("  {}  <-  {}", plan.repository.name, plan.base_ref));
     }
-    lines.extend([String::new(), "Y create · Esc cancel".into()]);
+    lines.extend([String::new(), "Y create · any other key cancel".into()]);
     ui.frame("Create dock", &lines)?;
     Ok(matches!(
         read_key()?.code,
@@ -322,7 +335,10 @@ pub(crate) fn confirm_create(
     ))
 }
 pub(crate) fn show_notice(ui: &mut Ui, title: &str, text: &str) -> Result<()> {
-    ui.frame(title, &[text.into(), String::new(), "Press any key".into()])?;
+    let mut lines = text.split('\n').map(str::to_owned).collect::<Vec<_>>();
+    lines.push(String::new());
+    lines.push("Press any key".into());
+    ui.frame(title, &lines)?;
     read_key()?;
     Ok(())
 }

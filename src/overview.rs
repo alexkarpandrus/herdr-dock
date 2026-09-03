@@ -1,4 +1,3 @@
-use crate::Result;
 use crate::archive::archive_dock;
 use crate::dock::{
     check_dock_session, ensure_no_live_legacy_workspace, legacy_workspace_is_live, reopen_dock,
@@ -7,13 +6,14 @@ use crate::dock::{
 use crate::git::optional_git;
 use crate::herdr::{current_herdr_session, herdr, live_workspaces};
 use crate::model::{
-    AgentOverview, DockOverview, DockRecord, LiveWorkspace, RepositoryOverview, State, load_state,
-    lock_state, save_state,
+    load_state, lock_state, save_state, AgentOverview, DockOverview, DockRecord, LiveWorkspace,
+    RepositoryOverview, State,
 };
 use crate::repos::required_directory;
 use crate::ui::{
-    Segment, Ui, confirm_archive, confirm_complete, plain, read_key, show_notice, styled,
+    confirm_archive, confirm_complete, plain, read_key, show_notice, styled, Segment, Ui,
 };
+use crate::Result;
 use crossterm::event::KeyCode;
 use crossterm::style::Color;
 use crossterm::terminal;
@@ -115,7 +115,10 @@ pub(crate) fn show_overview() -> Result<()> {
             .iter()
             .enumerate()
             .filter(|(_, dock)| {
-                filter.is_empty() || dock.name.to_lowercase().contains(&filter.to_lowercase())
+                filter.is_empty()
+                    || dock.name.to_lowercase().contains(&filter.to_lowercase())
+                    || dock.branch.to_lowercase().contains(&filter.to_lowercase())
+                    || dock.status.to_lowercase().contains(&filter.to_lowercase())
             })
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
@@ -141,13 +144,18 @@ pub(crate) fn show_overview() -> Result<()> {
                         plain(format!(" {}", dock.name)),
                         plain(" ["),
                         status_segment(&dock.status),
-                        plain(format!(
-                            "] · {} tabs · {} repos · {} dirty · {} agents",
-                            dock.tab_count,
-                            dock.repositories.len(),
-                            dirty,
-                            dock.agents.len()
-                        )),
+                        plain({
+                            let mut summary = format!(
+                                "] · {} tabs · {} repos",
+                                dock.tab_count,
+                                dock.repositories.len()
+                            );
+                            if dirty > 0 {
+                                summary.push_str(&format!(" · {dirty} dirty"));
+                            }
+                            summary.push_str(&format!(" · {} agents", dock.agents.len()));
+                            summary
+                        }),
                     ]
                 },
             ));
@@ -189,7 +197,13 @@ pub(crate) fn show_overview() -> Result<()> {
                     plain(format!("] · {}", repository.commit)),
                 ]);
             }
-            lines.truncate(height.saturating_sub(4));
+            let budget = height.saturating_sub(4);
+            if lines.len() > budget {
+                let visible = budget.saturating_sub(1).max(1);
+                let hidden = lines.len().saturating_sub(visible);
+                lines.truncate(visible);
+                lines.push(vec![plain(format!("… {hidden} more line(s) omitted"))]);
+            }
         }
 
         lines.push(vec![plain(String::new())]);
