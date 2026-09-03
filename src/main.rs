@@ -17,7 +17,13 @@ use std::{
     io::{self, IsTerminal, Stdout, Write},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use worktrees::WorktreeManager;
 
@@ -212,6 +218,164 @@ fn terminal_text(value: &str) -> String {
         }
     }
     escaped
+}
+
+struct Line {
+    text: String,
+    cursor: usize,
+}
+
+enum LineAction {
+    Edited,
+    Submit,
+    Cancel,
+    Ignored,
+}
+
+impl Line {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            cursor: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+    }
+
+    fn byte_at(&self, char_index: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(char_index)
+            .map(|(index, _)| index)
+            .unwrap_or(self.text.len())
+    }
+
+    fn char_before(&self) -> Option<char> {
+        if self.cursor == 0 {
+            None
+        } else {
+            self.text.chars().nth(self.cursor - 1)
+        }
+    }
+
+    fn display(&self) -> String {
+        let mut out = String::with_capacity(self.text.len() + 1);
+        for (index, character) in self.text.chars().enumerate() {
+            if index == self.cursor {
+                out.push('▏');
+            }
+            out.push(character);
+        }
+        if self.cursor >= self.text.chars().count() {
+            out.push('▏');
+        }
+        out
+    }
+
+    fn insert(&mut self, character: char) {
+        let byte = self.byte_at(self.cursor);
+        self.text.insert(byte, character);
+        self.cursor += 1;
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let byte = self.byte_at(self.cursor - 1);
+        self.text.remove(byte);
+        self.cursor -= 1;
+    }
+
+    fn delete_forward(&mut self) {
+        if self.cursor >= self.text.chars().count() {
+            return;
+        }
+        let byte = self.byte_at(self.cursor);
+        self.text.remove(byte);
+    }
+
+    fn handle(&mut self, key: &KeyEvent) -> LineAction {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => LineAction::Cancel,
+            KeyCode::Enter => LineAction::Submit,
+            KeyCode::Left => {
+                self.cursor = self.cursor.saturating_sub(1);
+                LineAction::Edited
+            }
+            KeyCode::Right => {
+                self.cursor = (self.cursor + 1).min(self.text.chars().count());
+                LineAction::Edited
+            }
+            KeyCode::Home => {
+                self.cursor = 0;
+                LineAction::Edited
+            }
+            KeyCode::End => {
+                self.cursor = self.text.chars().count();
+                LineAction::Edited
+            }
+            KeyCode::Backspace => {
+                self.backspace();
+                LineAction::Edited
+            }
+            KeyCode::Delete => {
+                self.delete_forward();
+                LineAction::Edited
+            }
+            KeyCode::Char('a') if control => {
+                self.cursor = 0;
+                LineAction::Edited
+            }
+            KeyCode::Char('e') if control => {
+                self.cursor = self.text.chars().count();
+                LineAction::Edited
+            }
+            KeyCode::Char('b') if control => {
+                self.cursor = self.cursor.saturating_sub(1);
+                LineAction::Edited
+            }
+            KeyCode::Char('f') if control => {
+                self.cursor = (self.cursor + 1).min(self.text.chars().count());
+                LineAction::Edited
+            }
+            KeyCode::Char('u') if control => {
+                let byte = self.byte_at(self.cursor);
+                self.text.drain(..byte);
+                self.cursor = 0;
+                LineAction::Edited
+            }
+            KeyCode::Char('w') if control => {
+                while self
+                    .char_before()
+                    .is_some_and(|character| !character.is_whitespace())
+                {
+                    self.backspace();
+                }
+                while self
+                    .char_before()
+                    .is_some_and(|character| character.is_whitespace())
+                {
+                    self.backspace();
+                }
+                LineAction::Edited
+            }
+            KeyCode::Char(character) => {
+                self.insert(character);
+                LineAction::Edited
+            }
+            _ => LineAction::Ignored,
+        }
+    }
+}
+
+enum BaseRefChoice {
+    One(String),
+    All(String),
 }
 
 impl Ui {
@@ -645,6 +809,31 @@ fn confirm_complete(ui: &mut Ui, dock: &DockOverview) -> Result<bool> {
             "Y close/done · any other key cancel".into(),
         ],
     )?;
+    Ok(matches!(
+        read_key()?.code,
+        KeyCode::Char('y') | KeyCode::Char('Y')
+    ))
+}
+
+fn confirm_create(
+    ui: &mut Ui,
+    name: &str,
+    branch: &str,
+    root: &Path,
+    plans: &[RepositoryPlan],
+) -> Result<bool> {
+    let mut lines = vec![
+        format!("Name:   {name}"),
+        format!("Branch: {branch}"),
+        format!("Root:   {}", root.display()),
+        String::new(),
+        "Repositories:".into(),
+    ];
+    for plan in plans {
+        lines.push(format!("  {}  <-  {}", plan.repository.name, plan.base_ref));
+    }
+    lines.extend([String::new(), "Y create · Esc cancel".into()]);
+    ui.frame("Create dock", &lines)?;
     Ok(matches!(
         read_key()?.code,
         KeyCode::Char('y') | KeyCode::Char('Y')
@@ -1262,22 +1451,41 @@ fn create_dock() -> Result<()> {
             return Ok(());
         };
         let mut plans = Vec::with_capacity(selected.len());
+        let mut base_for_all: Option<String> = None;
         for repository in selected {
             let refs = git_refs(&repository.path)?;
+            if let Some(base_ref) = &base_for_all
+                && refs.contains(base_ref)
+            {
+                plans.push(RepositoryPlan {
+                    repository,
+                    base_ref: base_ref.clone(),
+                });
+                continue;
+            }
+            base_for_all = None;
             let remembered = state.base_refs.get(&repository_key(&repository.path));
             let initial = remembered
                 .filter(|value| refs.contains(value))
                 .cloned()
                 .or_else(|| default_base_ref(&repository.path, &refs))
                 .unwrap_or_else(|| "HEAD".into());
-            let Some(base_ref) = prompt_base_ref(&mut ui, &repository.name, &refs, &initial)?
-            else {
+            let Some(choice) = prompt_base_ref(&mut ui, &repository.name, &refs, &initial)? else {
                 return Ok(());
             };
-            plans.push(RepositoryPlan {
-                repository,
-                base_ref,
-            });
+            match choice {
+                BaseRefChoice::One(base_ref) => plans.push(RepositoryPlan {
+                    repository,
+                    base_ref,
+                }),
+                BaseRefChoice::All(base_ref) => {
+                    plans.push(RepositoryPlan {
+                        repository,
+                        base_ref: base_ref.clone(),
+                    });
+                    base_for_all = Some(base_ref);
+                }
+            }
         }
         (name, plans, preset, recent)
     };
@@ -1287,6 +1495,13 @@ fn create_dock() -> Result<()> {
     let branch = format!("{}/{}", config.branch_prefix, slug);
     check_branch_name(&branch)?;
     let root = worktree_root.join(&slug);
+
+    {
+        let mut ui = Ui::start()?;
+        if !confirm_create(&mut ui, &name, &branch, &root, &plans)? {
+            return Ok(());
+        }
+    }
 
     println!("Creating {branch} in {}...", root.display());
     let worktrees = materialize_worktrees(config.worktree_manager, &root, &name, &branch, &plans)?;
@@ -1355,29 +1570,25 @@ fn create_dock() -> Result<()> {
 }
 
 fn prompt_name(ui: &mut Ui, prefix: &str) -> Result<Option<String>> {
-    let mut name = String::new();
+    let mut line = Line::new();
     loop {
-        let slug = slugify(&name);
+        let slug = slugify(&line.text);
         ui.frame(
             "Create dock · project name",
             &[
-                format!("> {name}"),
+                format!("> {}", line.display()),
                 String::new(),
                 format!(
                     "Branch: {prefix}/{}",
                     if slug.is_empty() { "…" } else { &slug }
                 ),
                 String::new(),
-                "Enter continue · Esc cancel · Backspace delete".into(),
+                "Enter continue · Esc cancel · arrows move · Ctrl+U clear".into(),
             ],
         )?;
-        match read_key()?.code {
-            KeyCode::Esc => return Ok(None),
-            KeyCode::Enter if !slug.is_empty() => return Ok(Some(name.trim().into())),
-            KeyCode::Backspace => {
-                name.pop();
-            }
-            KeyCode::Char(character) => name.push(character),
+        match line.handle(&read_key()?) {
+            LineAction::Submit if !slug.is_empty() => return Ok(Some(line.text.trim().into())),
+            LineAction::Cancel => return Ok(None),
             _ => {}
         }
     }
@@ -1391,21 +1602,49 @@ fn prompt_repositories(
 ) -> Result<Option<RepositorySelection>> {
     let mut repositories = repositories.to_vec();
     let mut selected = vec![false; repositories.len()];
-    let mut query = String::new();
+    let mut query = Line::new();
     let mut cursor = 0;
     let mut preset_name = None;
     let mut recent = Vec::new();
-    let mut discovered = None;
+    let mut discovered: Option<Vec<Repository>> = None;
+    let (scan_tx, scan_rx) = mpsc::channel::<std::result::Result<Vec<Repository>, String>>();
+    let mut scan_started = false;
+    let found = Arc::new(AtomicUsize::new(0));
     loop {
-        let quick_matches = if query.is_empty() {
+        if !scan_started
+            && discovered.is_none()
+            && !search_roots.is_empty()
+            && !query.text.is_empty()
+        {
+            scan_started = true;
+            let roots = search_roots.to_vec();
+            let tx = scan_tx.clone();
+            let counter = Arc::clone(&found);
+            thread::spawn(move || {
+                let result = discover_repositories_with_progress(&roots, Some(counter.as_ref()))
+                    .map_err(|error| error.to_string());
+                let _ = tx.send(result);
+            });
+        }
+        if discovered.is_none() {
+            match scan_rx.try_recv() {
+                Ok(Ok(found_repositories)) => discovered = Some(found_repositories),
+                Ok(Err(error)) => return Err(message(error)),
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => discovered = Some(Vec::new()),
+            }
+        }
+        let scanning = discovered.is_none() && scan_started;
+
+        let quick_matches = if query.text.is_empty() {
             repositories.iter().collect::<Vec<_>>()
         } else {
-            ranked_repositories(&query, &repositories)
+            ranked_repositories(&query.text, &repositories)
         };
-        let found_matches = if query.is_empty() {
+        let found_matches = if query.text.is_empty() {
             Vec::new()
         } else {
-            ranked_repositories(&query, discovered.as_deref().unwrap_or_default())
+            ranked_repositories(&query.text, discovered.as_deref().unwrap_or_default())
                 .into_iter()
                 .filter(|repository| {
                     !repositories
@@ -1427,10 +1666,19 @@ fn prompt_repositories(
         let height = terminal::size()?.1.saturating_sub(9) as usize;
         let visible = height.max(1).min(choices.len().max(1));
         let start = cursor.saturating_sub(visible.saturating_sub(1));
-        let mut lines = vec![format!("Search: > {query}"), String::new()];
+        let mut lines = vec![format!("Search: > {}", query.display())];
+        if scanning {
+            lines.push(format!(
+                "Scanning configured roots… {} found",
+                found.load(Ordering::Relaxed)
+            ));
+        }
+        lines.push(String::new());
         if choices.is_empty() {
-            lines.push(if query.is_empty() {
+            lines.push(if query.text.is_empty() {
                 "Type to search configured roots.".into()
+            } else if scanning {
+                "Searching…".into()
             } else {
                 "No matches.".into()
             });
@@ -1465,28 +1713,41 @@ fn prompt_repositories(
             lines.push("Shift+P load preset · Shift+S save preset".into());
         }
         ui.frame("Create dock · repositories", &lines)?;
-        match read_key()?.code {
-            KeyCode::Esc if !query.is_empty() => {
+
+        let key = if scanning {
+            if event::poll(Duration::from_millis(50))? {
+                Some(read_key()?)
+            } else {
+                None
+            }
+        } else {
+            Some(read_key()?)
+        };
+        let Some(key) = key else {
+            continue;
+        };
+        match key.code {
+            KeyCode::Esc if !query.text.is_empty() => {
                 query.clear();
                 cursor = 0;
             }
             KeyCode::Esc => return Ok(None),
             KeyCode::Up => cursor = cursor.saturating_sub(1),
             KeyCode::Down if !choices.is_empty() => cursor = (cursor + 1).min(choices.len() - 1),
-            KeyCode::Char(' ') if query.is_empty() && !choices.is_empty() => {
+            KeyCode::Char(' ') if query.text.is_empty() && !choices.is_empty() => {
                 selected[cursor] = !selected[cursor]
             }
-            KeyCode::Char('P') if query.is_empty() && !presets.is_empty() => {
+            KeyCode::Char('P') if query.text.is_empty() && !presets.is_empty() => {
                 if let Some(preset) = prompt_preset(ui, presets)? {
                     selected = selection_for_preset(&repositories, &preset);
                     preset_name = None;
                     cursor = 0;
                 }
             }
-            KeyCode::Char('S') if query.is_empty() && selected.iter().any(|value| *value) => {
+            KeyCode::Char('S') if query.text.is_empty() && selected.iter().any(|value| *value) => {
                 preset_name = prompt_text(ui, "Create dock · preset name")?;
             }
-            KeyCode::Enter if !query.is_empty() && !choices.is_empty() => {
+            KeyCode::Enter if !query.text.is_empty() && !choices.is_empty() => {
                 let (quick, repository) = (choices[cursor].0, choices[cursor].1.clone());
                 if quick {
                     if let Some(index) = repositories
@@ -1517,7 +1778,7 @@ fn prompt_repositories(
                     cursor = repositories.len() - 1;
                 }
             }
-            KeyCode::Enter if query.is_empty() && selected.iter().any(|value| *value) => {
+            KeyCode::Enter if query.text.is_empty() && selected.iter().any(|value| *value) => {
                 let chosen = repositories
                     .iter()
                     .zip(&selected)
@@ -1533,25 +1794,11 @@ fn prompt_repositories(
                 });
                 return Ok(Some((chosen, preset, recent)));
             }
-            KeyCode::Backspace if !query.is_empty() => {
-                query.pop();
-                cursor = 0;
-            }
-            KeyCode::Char(character) => {
-                query.push(character);
-                cursor = 0;
-                if discovered.is_none() && !search_roots.is_empty() {
-                    ui.frame(
-                        "Create dock · repositories",
-                        &[
-                            format!("Search: > {query}"),
-                            "Scanning configured roots…".into(),
-                        ],
-                    )?;
-                    discovered = Some(discover_repositories(search_roots)?);
+            _ => {
+                if let LineAction::Edited = query.handle(&key) {
+                    cursor = 0;
                 }
             }
-            _ => {}
         }
     }
 }
@@ -1652,25 +1899,21 @@ fn prompt_preset(ui: &mut Ui, presets: &[Preset]) -> Result<Option<Preset>> {
 }
 
 fn prompt_text(ui: &mut Ui, title: &str) -> Result<Option<String>> {
-    let mut value = String::new();
+    let mut line = Line::new();
     loop {
         ui.frame(
             title,
             &[
-                format!("> {value}"),
+                format!("> {}", line.display()),
                 String::new(),
-                "Enter save · Esc back · Backspace delete".into(),
+                "Enter save · Esc back · arrows move · Ctrl+U clear".into(),
             ],
         )?;
-        match read_key()?.code {
-            KeyCode::Esc => return Ok(None),
-            KeyCode::Enter if !value.trim().is_empty() => {
-                return Ok(Some(value.trim().into()));
+        match line.handle(&read_key()?) {
+            LineAction::Submit if !line.text.trim().is_empty() => {
+                return Ok(Some(line.text.trim().into()));
             }
-            KeyCode::Backspace => {
-                value.pop();
-            }
-            KeyCode::Char(character) => value.push(character),
+            LineAction::Cancel => return Ok(None),
             _ => {}
         }
     }
@@ -1700,17 +1943,17 @@ fn prompt_base_ref(
     repository: &str,
     refs: &[String],
     initial: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<BaseRefChoice>> {
     let initial_cursor = refs.iter().position(|value| value == initial).unwrap_or(0);
-    let mut query = String::new();
+    let mut query = Line::new();
     let mut cursor = initial_cursor;
     loop {
-        let matches = ranked_refs(&query, refs);
+        let matches = ranked_refs(&query.text, refs);
         cursor = cursor.min(matches.len().saturating_sub(1));
         let height = terminal::size()?.1.saturating_sub(9) as usize;
         let visible = height.max(1).min(matches.len().max(1));
         let start = cursor.saturating_sub(visible.saturating_sub(1));
-        let mut lines = vec![format!("Search: > {query}"), String::new()];
+        let mut lines = vec![format!("Search: > {}", query.display()), String::new()];
         if matches.is_empty() {
             lines.push("No matches.".into());
         } else {
@@ -1726,27 +1969,33 @@ fn prompt_base_ref(
         }
         lines.extend([
             String::new(),
-            "Type to search · ↑/↓ move · Enter select · Esc clear/cancel".into(),
+            "Type to search · ↑/↓ move · Enter select · Tab use for all · Esc clear/cancel".into(),
         ]);
         ui.frame(&format!("Create dock · base ref for {repository}"), &lines)?;
-        match read_key()?.code {
-            KeyCode::Esc if !query.is_empty() => {
+        let key = read_key()?;
+        match key.code {
+            KeyCode::Esc if !query.text.is_empty() => {
                 query.clear();
                 cursor = initial_cursor;
             }
             KeyCode::Esc => return Ok(None),
             KeyCode::Up => cursor = cursor.saturating_sub(1),
             KeyCode::Down if !matches.is_empty() => cursor = (cursor + 1).min(matches.len() - 1),
-            KeyCode::Enter if !matches.is_empty() => return Ok(Some(matches[cursor].clone())),
-            KeyCode::Backspace if !query.is_empty() => {
-                query.pop();
-                cursor = if query.is_empty() { initial_cursor } else { 0 };
+            KeyCode::Enter if !matches.is_empty() => {
+                return Ok(Some(BaseRefChoice::One(matches[cursor].clone())));
             }
-            KeyCode::Char(character) => {
-                query.push(character);
-                cursor = 0;
+            KeyCode::Tab if !matches.is_empty() => {
+                return Ok(Some(BaseRefChoice::All(matches[cursor].clone())));
             }
-            _ => {}
+            _ => {
+                if let LineAction::Edited = query.handle(&key) {
+                    cursor = if query.text.is_empty() {
+                        initial_cursor
+                    } else {
+                        0
+                    };
+                }
+            }
         }
     }
 }
@@ -1869,7 +2118,10 @@ fn remember_repository(recent: &mut Vec<PathBuf>, repository: PathBuf) {
     recent.insert(0, repository);
 }
 
-fn discover_repositories(search_roots: &[PathBuf]) -> Result<Vec<Repository>> {
+fn discover_repositories_with_progress(
+    search_roots: &[PathBuf],
+    progress: Option<&AtomicUsize>,
+) -> Result<Vec<Repository>> {
     let mut stack = Vec::new();
     for configured_root in search_roots {
         let root = expand_home(configured_root)?
@@ -1896,6 +2148,9 @@ fn discover_repositories(search_roots: &[PathBuf]) -> Result<Vec<Repository>> {
             if let Ok(repository) = load_repository(&directory, None)
                 && paths.insert(repository.path.clone())
             {
+                if let Some(counter) = progress {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
                 repositories.push(repository);
             }
             continue;
@@ -2459,6 +2714,38 @@ mod tests {
     }
 
     #[test]
+    fn line_editor_edits_with_cursor() {
+        let mut line = Line::new();
+        for character in "abc".chars() {
+            line.handle(&KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        assert_eq!(line.text, "abc");
+        assert_eq!(line.cursor, 3);
+
+        line.handle(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        line.handle(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        line.handle(&KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+        assert_eq!(line.text, "aXbc");
+        assert_eq!(line.cursor, 2);
+
+        line.handle(&KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(line.text, "abc");
+        assert_eq!(line.cursor, 1);
+
+        line.handle(&KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        line.handle(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(line.text, "");
+        assert_eq!(line.cursor, 0);
+
+        for character in "foo bar".chars() {
+            line.handle(&KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        line.handle(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(line.text, "foo");
+        assert_eq!(line.cursor, 3);
+    }
+
+    #[test]
     fn overview_keeps_the_state_record_index() -> Result<()> {
         let records: Vec<DockRecord> = serde_json::from_str(
             r#"[
@@ -2662,7 +2949,8 @@ mod tests {
         checked(Command::new("git").arg("init").arg("--quiet").arg(&api))?;
         checked(Command::new("git").arg("init").arg("--quiet").arg(&web))?;
 
-        let repositories = discover_repositories(std::slice::from_ref(&temporary))?;
+        let repositories =
+            discover_repositories_with_progress(std::slice::from_ref(&temporary), None)?;
         assert_eq!(repositories.len(), 2);
         assert_eq!(
             ranked_repositories("wc", &repositories)[0].name,

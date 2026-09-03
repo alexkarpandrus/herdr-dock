@@ -9,8 +9,8 @@ The `herdr-dock.create` action opens a terminal popup that:
 1. accepts a project name and previews its `<prefix>/<snake_case_slug>` branch;
 2. selects one or more configured repositories;
 3. loads or saves named repository presets with `P` and `S`;
-4. selects and remembers a base ref for each repository;
-5. creates the repositories as sibling Git worktrees;
+4. selects and remembers a base ref for each repository (`Tab` uses one ref for all);
+5. reviews the branch, root, and repositories, then creates them as sibling Git worktrees;
 6. writes `AGENTS.md` and `CLAUDE.md` in their shared root; and
 7. opens one Herdr tab per repository, plus a `shared` tab when multiple repositories are selected.
 

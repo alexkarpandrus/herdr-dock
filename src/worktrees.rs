@@ -1,4 +1,4 @@
-use crate::{checked, git, Result};
+use crate::{Result, checked, git};
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
