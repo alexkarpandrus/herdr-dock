@@ -11,8 +11,11 @@ use crate::model::{
     lock_state, save_state,
 };
 use crate::repos::required_directory;
-use crate::ui::{Ui, confirm_archive, confirm_complete, read_key, show_notice};
+use crate::ui::{
+    Segment, Ui, confirm_archive, confirm_complete, plain, read_key, show_notice, styled,
+};
 use crossterm::event::KeyCode;
+use crossterm::style::Color;
 use crossterm::terminal;
 use std::{
     collections::BTreeMap,
@@ -20,6 +23,33 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+fn status_color(status: &str) -> Option<Color> {
+    match status {
+        "working" | "running" | "clean" => Some(Color::Green),
+        "dirty" | "idle" | "session unknown" | "unavailable" => Some(Color::Yellow),
+        "missing" => Some(Color::Red),
+        "archived" | "done" | "closed" | "saved" => Some(Color::DarkGrey),
+        _ => None,
+    }
+}
+
+fn status_segment(status: &str) -> Segment {
+    match status_color(status) {
+        Some(color) => styled(color, status),
+        None => plain(status),
+    }
+}
+
+fn overview_hint(dock: &DockOverview) -> String {
+    if dock.archived {
+        "↑/↓ select · / filter · R refresh · Esc close".into()
+    } else if dock.done {
+        "↑/↓ select · Enter reopen · A archive · / filter · R refresh · Esc close".into()
+    } else {
+        "↑/↓ select · Enter focus/reopen · D close · A archive · / filter · R refresh · Esc close"
+            .into()
+    }
+}
 pub(crate) fn show_overview() -> Result<()> {
     let state_dir = required_directory("HERDR_PLUGIN_STATE_DIR")?;
     let state_path = state_dir.join("state.json");
@@ -32,92 +62,138 @@ pub(crate) fn show_overview() -> Result<()> {
     let current_session = current_herdr_session()?;
     let mut docks = collect_overview(&mut state, &state_path, current_session.as_deref())?;
     let mut cursor: usize = 0;
+    let mut filter = String::new();
+    let mut filtering = false;
     let mut ui = Ui::start()?;
     loop {
-        let height = terminal::size()?.1 as usize;
-        let visible = (height / 3).max(1).min(docks.len());
-        let start = cursor.saturating_sub(visible.saturating_sub(1));
-        let mut lines = docks[start..start + visible]
+        let matches = docks
             .iter()
             .enumerate()
-            .map(|(offset, dock)| {
-                let dirty = dock
-                    .repositories
-                    .iter()
-                    .filter(|repository| repository.status == "dirty")
-                    .count();
-                format!(
-                    "{} {} [{}] · {} tabs · {} repos · {} dirty · {} agents",
-                    if start + offset == cursor { ">" } else { " " },
-                    dock.name,
-                    dock.status,
-                    dock.tab_count,
-                    dock.repositories.len(),
-                    dirty,
-                    dock.agents.len()
-                )
+            .filter(|(_, dock)| {
+                filter.is_empty() || dock.name.to_lowercase().contains(&filter.to_lowercase())
             })
+            .map(|(index, _)| index)
             .collect::<Vec<_>>();
-        let dock = &docks[cursor];
-        lines.extend([
-            String::new(),
-            format!("Branch: {}", dock.branch),
-            format!("Root: {}", dock.root.display()),
-            format!(
+        cursor = cursor.min(matches.len().saturating_sub(1));
+        let height = terminal::size()?.1 as usize;
+        let visible = (height / 3).max(1).min(matches.len().max(1));
+        let start = cursor.saturating_sub(visible.saturating_sub(1));
+        let mut lines: Vec<Vec<Segment>> = Vec::new();
+
+        if matches.is_empty() {
+            lines.push(vec![plain(format!("No docks match \"{filter}\"."))]);
+        } else {
+            lines.extend(matches[start..start + visible].iter().enumerate().map(
+                |(offset, index)| {
+                    let dock = &docks[*index];
+                    let dirty = dock
+                        .repositories
+                        .iter()
+                        .filter(|repository| repository.status == "dirty")
+                        .count();
+                    vec![
+                        plain(if start + offset == cursor { ">" } else { " " }),
+                        plain(format!(" {}", dock.name)),
+                        plain(" ["),
+                        status_segment(&dock.status),
+                        plain(format!(
+                            "] · {} tabs · {} repos · {} dirty · {} agents",
+                            dock.tab_count,
+                            dock.repositories.len(),
+                            dirty,
+                            dock.agents.len()
+                        )),
+                    ]
+                },
+            ));
+
+            let dock = &docks[matches[cursor]];
+            lines.push(vec![plain(String::new())]);
+            lines.push(vec![plain(format!("Branch: {}", dock.branch))]);
+            lines.push(vec![plain(format!("Root: {}", dock.root.display()))]);
+            lines.push(vec![plain(format!(
                 "Herdr session: {}",
                 dock.herdr_session.as_deref().unwrap_or("current/legacy")
-            ),
-            String::new(),
-            "Agents".into(),
-        ]);
-        if dock.agents.is_empty() {
-            lines.push("  none".into());
-        } else {
-            lines.extend(dock.agents.iter().map(|agent| {
-                format!(
-                    "  {} ({}) [{}] · {} · session {}",
-                    agent.name,
-                    agent.kind,
-                    agent.status,
-                    agent.cwd,
-                    agent
+            ))]);
+            lines.push(vec![plain(String::new())]);
+            lines.push(vec![plain("Agents")]);
+            if dock.agents.is_empty() {
+                lines.push(vec![plain("  none")]);
+            } else {
+                for agent in &dock.agents {
+                    let session = agent
                         .session
                         .as_ref()
                         .map(|session| session.value.as_str())
-                        .unwrap_or("unavailable")
-                )
-            }));
+                        .unwrap_or("unavailable");
+                    lines.push(vec![
+                        plain(format!("  {}", agent.name)),
+                        plain(format!(" ({}) [", agent.kind)),
+                        status_segment(&agent.status),
+                        plain(format!("] · {} · session {session}", agent.cwd)),
+                    ]);
+                }
+            }
+            lines.push(vec![plain(String::new())]);
+            lines.push(vec![plain("Repositories")]);
+            for repository in &dock.repositories {
+                lines.push(vec![
+                    plain(format!("  {}", repository.name)),
+                    plain(" ["),
+                    status_segment(&repository.status),
+                    plain(format!("] · {}", repository.commit)),
+                ]);
+            }
+            lines.truncate(height.saturating_sub(4));
         }
-        lines.push(String::new());
-        lines.push("Repositories".into());
-        lines.extend(dock.repositories.iter().map(|repository| {
-            format!(
-                "  {} [{}] · {}",
-                repository.name, repository.status, repository.commit
-            )
-        }));
-        lines.truncate(height.saturating_sub(4));
-        lines.extend([
-            String::new(),
-            if dock.archived {
-                "↑/↓ select · R refresh · Esc close".into()
-            } else if dock.done {
-                "↑/↓ select · Enter reopen · A archive/remove · R refresh · Esc close".into()
-            } else {
-                "↑/↓ select · Enter focus/reopen · D close/done · A archive/remove · R refresh · Esc close"
-                    .into()
-            },
-        ]);
-        ui.frame("Dock overview", &lines)?;
+
+        lines.push(vec![plain(String::new())]);
+        if filtering {
+            lines.push(vec![plain(format!("Filter: {filter}_"))]);
+        } else if !filter.is_empty() {
+            lines.push(vec![styled(Color::Cyan, format!("Filter: {filter}"))]);
+        }
+        lines.push(vec![plain(if matches.is_empty() {
+            "Esc back · type to filter".into()
+        } else if filtering {
+            "Type to filter · Enter done · Esc clear".into()
+        } else {
+            overview_hint(&docks[matches[cursor]])
+        })]);
+
+        ui.frame_styled("Dock overview", &lines)?;
 
         match read_key()?.code {
+            KeyCode::Esc if filtering => {
+                filtering = false;
+                filter.clear();
+                cursor = 0;
+            }
+            KeyCode::Esc if !filter.is_empty() => {
+                filter.clear();
+                cursor = 0;
+            }
             KeyCode::Esc => return Ok(()),
+            KeyCode::Char('/') if !filtering => filtering = true,
+            KeyCode::Enter if filtering => filtering = false,
+            KeyCode::Backspace if filtering => {
+                filter.pop();
+                cursor = 0;
+            }
+            KeyCode::Char(character) if filtering => {
+                filter.push(character);
+                cursor = 0;
+            }
             KeyCode::Up => cursor = cursor.saturating_sub(1),
-            KeyCode::Down => cursor = (cursor + 1).min(docks.len() - 1),
-            KeyCode::Char('r') | KeyCode::Char('R') => {
+            KeyCode::Down if !matches.is_empty() => cursor = (cursor + 1).min(matches.len() - 1),
+            KeyCode::Char('r') | KeyCode::Char('R') if !filtering => {
                 docks = collect_overview(&mut state, &state_path, current_session.as_deref())?;
             }
-            KeyCode::Char('d') | KeyCode::Char('D') if !dock.archived && !dock.done => {
+            KeyCode::Char('d') | KeyCode::Char('D') if !filtering && !matches.is_empty() => {
+                let dock = &docks[matches[cursor]];
+                if dock.archived || dock.done {
+                    continue;
+                }
                 let index = dock.record_index;
                 let open = dock.open;
                 if !confirm_complete(&mut ui, dock)? {
@@ -149,7 +225,11 @@ pub(crate) fn show_overview() -> Result<()> {
                     Err(error) => show_notice(&mut ui, "Dock not closed", &error.to_string())?,
                 }
             }
-            KeyCode::Char('a') | KeyCode::Char('A') if !dock.archived => {
+            KeyCode::Char('a') | KeyCode::Char('A') if !filtering && !matches.is_empty() => {
+                let dock = &docks[matches[cursor]];
+                if dock.archived {
+                    continue;
+                }
                 let index = dock.record_index;
                 let open = dock.open;
                 if !confirm_archive(&mut ui, dock)? {
@@ -184,7 +264,11 @@ pub(crate) fn show_overview() -> Result<()> {
                     }
                 }
             }
-            KeyCode::Enter if !dock.archived => {
+            KeyCode::Enter if !filtering && !matches.is_empty() => {
+                let dock = &docks[matches[cursor]];
+                if dock.archived {
+                    continue;
+                }
                 let index = dock.record_index;
                 let open = dock.open;
                 let workspace_id = dock.workspace_id.clone();

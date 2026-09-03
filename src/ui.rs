@@ -4,7 +4,7 @@ use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute, queue,
-    style::{Attribute, Print, SetAttribute},
+    style::{Attribute, Color, Print, SetAttribute, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{
@@ -26,6 +26,19 @@ pub(crate) fn terminal_text(value: &str) -> String {
         }
     }
     escaped
+}
+
+pub(crate) enum Segment {
+    Plain(String),
+    Styled(Color, String),
+}
+
+pub(crate) fn plain(text: impl Into<String>) -> Segment {
+    Segment::Plain(text.into())
+}
+
+pub(crate) fn styled(color: Color, text: impl Into<String>) -> Segment {
+    Segment::Styled(color, text.into())
 }
 
 pub(crate) struct Line {
@@ -209,6 +222,34 @@ impl Ui {
         )?;
         for line in lines {
             queue!(self.stdout, Print(terminal_text(line)), Print("\r\n"))?;
+        }
+        self.stdout.flush()?;
+        Ok(())
+    }
+
+    pub(crate) fn frame_styled(&mut self, title: &str, lines: &[Vec<Segment>]) -> Result<()> {
+        queue!(
+            self.stdout,
+            MoveTo(0, 0),
+            Clear(ClearType::All),
+            SetAttribute(Attribute::Bold),
+            Print(terminal_text(title)),
+            SetAttribute(Attribute::Reset),
+            Print("\r\n\r\n")
+        )?;
+        for line in lines {
+            for segment in line {
+                match segment {
+                    Segment::Plain(text) => queue!(self.stdout, Print(terminal_text(text)))?,
+                    Segment::Styled(color, text) => queue!(
+                        self.stdout,
+                        SetForegroundColor(*color),
+                        Print(terminal_text(text)),
+                        SetForegroundColor(Color::Reset)
+                    )?,
+                }
+            }
+            queue!(self.stdout, Print("\r\n"))?;
         }
         self.stdout.flush()?;
         Ok(())

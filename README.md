@@ -53,21 +53,27 @@ The overview refreshes this metadata from Herdr. Enter focuses a live workspace.
 
 ## Install
 
+### Quick start
+
+```sh
+# 1. Install — downloads the repository and builds it with Cargo
+herdr plugin install alexkarpandrus/herdr-dock
+
+# 2. Add repositories — the config file is created on your first run
+${EDITOR:-vi} "$(herdr plugin config-dir herdr-dock)/config.toml"
+
+# 3. Try it, then bind hotkeys (see below)
+herdr plugin action invoke create --plugin herdr-dock
+```
+
+The first create run writes a `config.toml` template and prints a pointer to it. Add repositories or search roots there, then run the create action again.
+
 Requirements:
 
 - macOS or Linux;
 - [Herdr](https://herdr.dev) 0.8.2 or newer;
 - Git; and
-- Rust 1.89 or newer and Cargo to build the plugin.
-
-### Install from GitHub
-
-```sh
-herdr plugin install alexkarpandrus/herdr-dock
-herdr plugin list
-```
-
-Herdr downloads the repository, runs `cargo build --release`, and enables the plugin.
+- Rust 1.89 or newer and Cargo, because `herdr plugin install` builds from source.
 
 ### Link a local checkout
 
