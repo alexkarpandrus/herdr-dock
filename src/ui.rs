@@ -28,6 +28,7 @@ pub(crate) fn terminal_text(value: &str) -> String {
     escaped
 }
 
+#[derive(Clone)]
 pub(crate) enum Segment {
     Plain(String),
     Styled(Color, String),

@@ -42,11 +42,12 @@ fn status_segment(status: &str) -> Segment {
 
 fn overview_hint(dock: &DockOverview) -> String {
     if dock.archived {
-        "↑/↓ select · / filter · R refresh · ? help · Esc close".into()
+        "↑↓ move · ←→ column · / filter · R refresh · ? help · Esc close".into()
     } else if dock.done {
-        "↑/↓ select · Enter reopen · A archive · / filter · R refresh · ? help · Esc close".into()
+        "↑↓ move · ←→ column · Enter reopen · A archive · / filter · R refresh · ? help · Esc close"
+            .into()
     } else {
-        "↑/↓ select · Enter focus/reopen · D close · A archive · / filter · R refresh · ? help · Esc close"
+        "↑↓ move · ←→ column · Enter focus/reopen · D close · A archive · / filter · R refresh · ? help · Esc close"
             .into()
     }
 }
@@ -55,7 +56,7 @@ fn show_help(ui: &mut Ui) -> Result<()> {
     let lines = vec![
         vec![plain("Keys")],
         vec![plain(
-            "  ↑/↓ select    Enter focus/reopen    D close    A archive",
+            "  ↑↓ move ←→ column    Enter focus/reopen    D close    A archive",
         )],
         vec![plain(
             "  / filter      R refresh             Esc close  ? help",
@@ -79,6 +80,348 @@ fn show_help(ui: &mut Ui) -> Result<()> {
     read_key()?;
     Ok(())
 }
+/// The kanban lane a dock belongs to, in on-screen column order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lane {
+    Working,
+    Closed,
+    Done,
+    Archived,
+}
+
+fn lane_for(dock: &DockOverview) -> Lane {
+    if dock.archived {
+        Lane::Archived
+    } else if dock.done {
+        Lane::Done
+    } else if dock.open {
+        Lane::Working
+    } else {
+        Lane::Closed
+    }
+}
+
+fn lane_color(lane: Lane) -> Color {
+    match lane {
+        Lane::Working => Color::Green,
+        Lane::Closed => Color::Cyan,
+        Lane::Done => Color::DarkGrey,
+        Lane::Archived => Color::DarkGrey,
+    }
+}
+
+fn lane_title(lane: Lane) -> &'static str {
+    match lane {
+        Lane::Working => "Working",
+        Lane::Closed => "Closed",
+        Lane::Done => "Done",
+        Lane::Archived => "Archived",
+    }
+}
+fn dirty_count(dock: &DockOverview) -> usize {
+    dock.repositories
+        .iter()
+        .filter(|repository| repository.status == "dirty")
+        .count()
+}
+
+/// Render the matched docks as a kanban board: one column per lane, one card per dock.
+/// The lanes (in on-screen order) that actually contain a matched dock.
+fn active_lanes(docks: &[DockOverview], matches: &[usize]) -> Vec<Lane> {
+    let mut present = [false; 4];
+    for index in matches {
+        present[match lane_for(&docks[*index]) {
+            Lane::Working => 0,
+            Lane::Closed => 1,
+            Lane::Done => 2,
+            Lane::Archived => 3,
+        }] = true;
+    }
+    let mut lanes = Vec::new();
+    for (i, is) in present.iter().enumerate() {
+        if *is {
+            lanes.push(match i {
+                0 => Lane::Working,
+                1 => Lane::Closed,
+                2 => Lane::Done,
+                _ => Lane::Archived,
+            });
+        }
+    }
+    lanes
+}
+
+/// Flat cursor index into `matches` for a dock in `lane` at `rank` (0-based within the lane).
+fn index_for_lane_rank(
+    docks: &[DockOverview],
+    matches: &[usize],
+    lane: Lane,
+    rank: usize,
+) -> Option<usize> {
+    let mut seen = 0;
+    for (i, index) in matches.iter().enumerate() {
+        if lane_for(&docks[*index]) == lane {
+            if seen == rank {
+                return Some(i);
+            }
+            seen += 1;
+        }
+    }
+    None
+}
+
+fn cursor_rank(docks: &[DockOverview], matches: &[usize], cursor: usize) -> (usize, Lane) {
+    let lane = lane_for(&docks[matches[cursor]]);
+    let mut rank = 0;
+    for (i, index) in matches.iter().enumerate() {
+        if i >= cursor {
+            break;
+        }
+        if lane_for(&docks[*index]) == lane {
+            rank += 1;
+        }
+    }
+    (rank, lane)
+}
+
+/// Move the flat cursor in a kanban-aware way: up/down within a lane, left/right across lanes.
+fn move_cursor(docks: &[DockOverview], matches: &[usize], cursor: usize, dir: &str) -> usize {
+    if matches.is_empty() {
+        return 0;
+    }
+    let (rank, lane) = cursor_rank(docks, matches, cursor);
+    match dir {
+        "down" => {
+            let lane_count = matches
+                .iter()
+                .filter(|index| lane_for(&docks[**index]) == lane)
+                .count();
+            if rank + 1 < lane_count {
+                index_for_lane_rank(docks, matches, lane, rank + 1).unwrap_or(cursor)
+            } else {
+                cursor
+            }
+        }
+        "up" => {
+            if rank > 0 {
+                index_for_lane_rank(docks, matches, lane, rank - 1).unwrap_or(cursor)
+            } else {
+                cursor
+            }
+        }
+        "left" | "right" => {
+            let lanes = active_lanes(docks, matches);
+            let cur = lanes.iter().position(|l| *l == lane).unwrap_or(0);
+            let last = lanes.len().saturating_sub(1);
+            let target = if dir == "left" {
+                cur.saturating_sub(1)
+            } else {
+                (cur + 1).min(last)
+            };
+            if target == cur {
+                cursor
+            } else {
+                index_for_lane_rank(docks, matches, lanes[target], rank).unwrap_or(cursor)
+            }
+        }
+        _ => cursor,
+    }
+}
+
+fn board_lines(
+    docks: &[DockOverview],
+    matches: &[usize],
+    cursor: usize,
+    filter: &str,
+) -> Vec<Vec<Segment>> {
+    if matches.is_empty() {
+        let message = if filter.is_empty() {
+            "No docks yet.".to_string()
+        } else {
+            format!("No docks match \"{filter}\".")
+        };
+        return vec![vec![plain(message)]];
+    }
+
+    // Group matched docks by lane, preserving the flat matching order.
+    let lanes = [Lane::Working, Lane::Closed, Lane::Done, Lane::Archived];
+    let mut groups: [Vec<usize>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for (i, index) in matches.iter().enumerate() {
+        let lane = lane_for(&docks[*index]);
+        let col = match lane {
+            Lane::Working => 0,
+            Lane::Closed => 1,
+            Lane::Done => 2,
+            Lane::Archived => 3,
+        };
+        groups[col].push(i);
+    }
+
+    let (term_cols, _) = terminal::size().unwrap_or((120, 40));
+    let term_cols = term_cols as usize;
+    let nlanes = groups.iter().filter(|g| !g.is_empty()).count().max(1);
+    let col_width = (term_cols.saturating_sub(2) / nlanes).clamp(18, 34);
+
+    // Build each lane into a block of lines: header + one card per dock.
+    let mut lane_blocks: Vec<Vec<Vec<Segment>>> = Vec::new();
+    let mut max_rows = 0usize;
+    for (col, group) in groups.iter().enumerate() {
+        let lane = lanes[col];
+        let mut block: Vec<Vec<Segment>> = Vec::new();
+        let count = group.len();
+        block.push(vec![
+            styled(lane_color(lane), format!(" {}", lane_title(lane))),
+            plain(format!("  {count}")),
+        ]);
+        block.push(vec![plain(" ".repeat(col_width))]);
+        for (pos, slot) in group.iter().enumerate() {
+            let i = *slot;
+            let dock = &docks[matches[i]];
+            let selected = i == cursor;
+            block.extend(card_lines(dock, col_width, selected));
+            if pos + 1 < group.len() {
+                block.push(vec![plain(" ".repeat(col_width))]);
+            }
+        }
+        if block.len() > max_rows {
+            max_rows = block.len();
+        }
+        lane_blocks.push(block);
+    }
+
+    // Lay the lanes side by side, padding shorter columns with blanks.
+    let mut lines: Vec<Vec<Segment>> = Vec::new();
+    for row in 0..max_rows {
+        let mut line: Vec<Segment> = Vec::new();
+        for (col, block) in lane_blocks.iter().enumerate() {
+            if let Some(segments) = block.get(row) {
+                line.extend(segments.iter().cloned());
+            } else {
+                line.push(plain(" ".repeat(col_width + 2)));
+            }
+            if col + 1 < lane_blocks.len() {
+                line.push(styled(Color::DarkGrey, "│"));
+            }
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+fn card_lines(dock: &DockOverview, width: usize, selected: bool) -> Vec<Vec<Segment>> {
+    let inner = width.saturating_sub(4);
+    let accent = if selected {
+        Color::Cyan
+    } else {
+        Color::DarkGrey
+    };
+
+    let name = truncate(&dock.name, inner.saturating_sub(2));
+    let name_len = name.chars().count();
+    let mut title: Vec<Segment> = vec![plain(if selected { "┌▶ " } else { "┌  " })];
+    title.push(styled(accent, name));
+    title.push(plain("─".repeat(inner.saturating_sub(name_len + 3))));
+    title.push(plain("┐"));
+
+    let status = truncate(&dock.status, inner.saturating_sub(8));
+    let status_text = format!("{} · {} tabs", status, dock.tab_count);
+    let mut status_row: Vec<Segment> = vec![plain("│ ")];
+    status_row.extend([
+        status_segment(&status),
+        plain(format!(" · {} tabs", dock.tab_count)),
+    ]);
+    status_row.push(plain(
+        " ".repeat(inner.saturating_sub(status_text.chars().count() + 1)),
+    ));
+    status_row.push(plain("│"));
+
+    let dirty = dirty_count(dock);
+    let agents = dock.agents.len();
+    let summary = format!(
+        "{} repos · {} dirty · {} agent{}",
+        dock.repositories.len(),
+        dirty,
+        agents,
+        if agents == 1 { "" } else { "s" }
+    );
+    let summary = truncate(&summary, inner.saturating_sub(1));
+    let mut summary_row: Vec<Segment> = vec![plain("│ ")];
+    summary_row.push(if dirty > 0 {
+        styled(Color::Yellow, &summary)
+    } else {
+        plain(&summary)
+    });
+    summary_row.push(plain(
+        " ".repeat(inner.saturating_sub(summary.chars().count() + 1)),
+    ));
+    summary_row.push(plain("│"));
+
+    let branch = truncate(dock.branch.as_str(), inner.saturating_sub(1));
+    let mut branch_row: Vec<Segment> = vec![plain("│ ")];
+    branch_row.push(plain(&branch));
+    branch_row.push(plain(
+        " ".repeat(inner.saturating_sub(branch.chars().count() + 1)),
+    ));
+    branch_row.push(plain("│"));
+
+    vec![
+        title,
+        status_row,
+        summary_row,
+        branch_row,
+        vec![plain("└"), plain("─".repeat(inner)), plain("┘")],
+    ]
+}
+
+/// Detail pane for the selected dock, shown below the kanban board.
+fn detail_lines(dock: &DockOverview) -> Vec<Vec<Segment>> {
+    let mut lines: Vec<Vec<Segment>> = Vec::new();
+    lines.push(vec![plain(format!("Branch: {}", dock.branch))]);
+    lines.push(vec![plain(format!("Root: {}", dock.root.display()))]);
+    lines.push(vec![plain(format!(
+        "Herdr session: {}",
+        dock.herdr_session.as_deref().unwrap_or("current/legacy")
+    ))]);
+    lines.push(vec![plain(String::new())]);
+    lines.push(vec![plain("Agents")]);
+    if dock.agents.is_empty() {
+        lines.push(vec![plain("  none")]);
+    } else {
+        for agent in &dock.agents {
+            let session = agent
+                .session
+                .as_ref()
+                .map(|session| session.value.as_str())
+                .unwrap_or("unavailable");
+            lines.push(vec![
+                plain(format!("  {}", agent.name)),
+                plain(format!(" ({}) [", agent.kind)),
+                status_segment(&agent.status),
+                plain(format!("] · {} · session {session}", agent.cwd)),
+            ]);
+        }
+    }
+    lines.push(vec![plain(String::new())]);
+    lines.push(vec![plain("Repositories")]);
+    for repository in &dock.repositories {
+        lines.push(vec![
+            plain(format!("  {}", repository.name)),
+            plain(" ["),
+            status_segment(&repository.status),
+            plain(format!("] · {}", repository.commit)),
+        ]);
+    }
+    lines
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{cut}…")
+}
+
 pub(crate) fn show_overview() -> Result<()> {
     let state_dir = required_directory("HERDR_PLUGIN_STATE_DIR")?;
     let state_path = state_dir.join("state.json");
@@ -123,87 +466,19 @@ pub(crate) fn show_overview() -> Result<()> {
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
         cursor = cursor.min(matches.len().saturating_sub(1));
-        let height = terminal::size()?.1 as usize;
-        let visible = (height / 3).max(1).min(matches.len().max(1));
-        let start = cursor.saturating_sub(visible.saturating_sub(1));
-        let mut lines: Vec<Vec<Segment>> = Vec::new();
+        let mut lines = board_lines(&docks, &matches, cursor, &filter);
 
-        if matches.is_empty() {
-            lines.push(vec![plain(format!("No docks match \"{filter}\"."))]);
-        } else {
-            lines.extend(matches[start..start + visible].iter().enumerate().map(
-                |(offset, index)| {
-                    let dock = &docks[*index];
-                    let dirty = dock
-                        .repositories
-                        .iter()
-                        .filter(|repository| repository.status == "dirty")
-                        .count();
-                    vec![
-                        plain(if start + offset == cursor { ">" } else { " " }),
-                        plain(format!(" {}", dock.name)),
-                        plain(" ["),
-                        status_segment(&dock.status),
-                        plain({
-                            let mut summary = format!(
-                                "] · {} tabs · {} repos",
-                                dock.tab_count,
-                                dock.repositories.len()
-                            );
-                            if dirty > 0 {
-                                summary.push_str(&format!(" · {dirty} dirty"));
-                            }
-                            summary.push_str(&format!(" · {} agents", dock.agents.len()));
-                            summary
-                        }),
-                    ]
-                },
-            ));
-
+        // Detail pane for the selected dock (hidden while typing a filter).
+        if !matches.is_empty() && !filtering {
             let dock = &docks[matches[cursor]];
-            lines.push(vec![plain(String::new())]);
-            lines.push(vec![plain(format!("Branch: {}", dock.branch))]);
-            lines.push(vec![plain(format!("Root: {}", dock.root.display()))]);
-            lines.push(vec![plain(format!(
-                "Herdr session: {}",
-                dock.herdr_session.as_deref().unwrap_or("current/legacy")
-            ))]);
-            lines.push(vec![plain(String::new())]);
-            lines.push(vec![plain("Agents")]);
-            if dock.agents.is_empty() {
-                lines.push(vec![plain("  none")]);
-            } else {
-                for agent in &dock.agents {
-                    let session = agent
-                        .session
-                        .as_ref()
-                        .map(|session| session.value.as_str())
-                        .unwrap_or("unavailable");
-                    lines.push(vec![
-                        plain(format!("  {}", agent.name)),
-                        plain(format!(" ({}) [", agent.kind)),
-                        status_segment(&agent.status),
-                        plain(format!("] · {} · session {session}", agent.cwd)),
-                    ]);
-                }
+            let height = terminal::size()?.1 as usize;
+            let mut detail = detail_lines(dock);
+            let budget = height.saturating_sub(lines.len() + 5);
+            if detail.len() > budget {
+                detail.truncate(budget.max(2));
             }
             lines.push(vec![plain(String::new())]);
-            lines.push(vec![plain("Repositories")]);
-            for repository in &dock.repositories {
-                lines.push(vec![
-                    plain(format!("  {}", repository.name)),
-                    plain(" ["),
-                    status_segment(&repository.status),
-                    plain(format!("] · {}", repository.commit)),
-                ]);
-            }
-            let budget = height.saturating_sub(4);
-            if lines.len() > budget {
-                let visible = budget.saturating_sub(1).max(1);
-                let hidden = lines.len().saturating_sub(visible);
-                lines.truncate(visible);
-                lines.push(vec![plain(format!("… {hidden} more line(s) omitted"))]);
-            }
+            lines.extend(detail);
         }
 
         lines.push(vec![plain(String::new())]);
@@ -245,8 +520,12 @@ pub(crate) fn show_overview() -> Result<()> {
                 filter.push(character);
                 cursor = 0;
             }
-            KeyCode::Up => cursor = cursor.saturating_sub(1),
-            KeyCode::Down if !matches.is_empty() => cursor = (cursor + 1).min(matches.len() - 1),
+            KeyCode::Up => cursor = move_cursor(&docks, &matches, cursor, "up"),
+            KeyCode::Down if !matches.is_empty() => {
+                cursor = move_cursor(&docks, &matches, cursor, "down")
+            }
+            KeyCode::Left if !filtering => cursor = move_cursor(&docks, &matches, cursor, "left"),
+            KeyCode::Right if !filtering => cursor = move_cursor(&docks, &matches, cursor, "right"),
             KeyCode::Char('r') | KeyCode::Char('R') if !filtering => {
                 docks = collect_overview(&mut state, &state_path, current_session.as_deref())?;
             }

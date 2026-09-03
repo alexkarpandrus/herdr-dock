@@ -52,7 +52,7 @@ The `herdr-dock.create` action opens a terminal popup that:
 6. writes `AGENTS.md` and `CLAUDE.md` in their shared root; and
 7. opens one Herdr tab per repository, plus a `shared` tab when multiple repositories are selected.
 
-The `herdr-dock.overview` action shows saved dock history with live Herdr workspace and agent states, dirty repository counts, and latest commit subjects. Press Enter to focus an open dock or reopen a closed dock and resume its saved agent sessions. Press `D` to close a dock and mark it done. Press `A` to archive and remove clean worktrees.
+The `herdr-dock.overview` action opens a kanban board: one column per status (Working, Closed, Done, Archived), with each dock as a card showing its name, status, tab/repo/dirty/agent counts, and branch. Move with the arrow keys (↑/↓ within a column, ←/→ across columns), press Enter to focus an open dock or reopen a closed dock and resume its saved agent sessions, press `D` to close a dock and mark it done, and press `A` to archive and remove clean worktrees. The pane under the board shows the selected dock's branch, root, Herdr session, agents, and repository details.
 
 The `herdr-dock.setup` action writes the recommended keybindings into your Herdr configuration.
 
