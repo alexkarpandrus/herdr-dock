@@ -4,7 +4,9 @@ use crate::herdr::{current_herdr_session, herdr, open_workspace};
 use crate::model::{
     DockRecord, DockRepository, DockTab, RepositoryPlan, load_state, lock_state, save_state,
 };
-use crate::prompts::{prompt_base_ref, prompt_directory, prompt_name, prompt_repositories, upsert_preset};
+use crate::prompts::{
+    prompt_base_ref, prompt_directory, prompt_name, prompt_repositories, upsert_preset,
+};
 use crate::repos::{
     expand_home, load_config, load_repositories, merge_recent_repositories, remember_repository,
     repository_key, required_directory, write_search_root,

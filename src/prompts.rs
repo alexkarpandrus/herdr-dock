@@ -1,8 +1,8 @@
+use crate::Result;
 use crate::git::message;
 use crate::model::{Preset, Repository, RepositorySelection};
 use crate::repos::{discover_repositories_with_progress, expand_home, repository_key};
-use crate::ui::{read_key, show_notice, slugify, BaseRefChoice, Line, LineAction, Ui};
-use crate::Result;
+use crate::ui::{BaseRefChoice, Line, LineAction, Ui, read_key, show_notice, slugify};
 use crossterm::event::{self, KeyCode};
 use crossterm::terminal;
 use std::{
@@ -11,8 +11,9 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
+        Arc,
         atomic::{AtomicUsize, Ordering},
-        mpsc, Arc,
+        mpsc,
     },
     thread,
     time::Duration,

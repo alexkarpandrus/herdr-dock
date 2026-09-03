@@ -1,42 +1,61 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="herdr-dock logo">
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="herdr-dock logo: a shepherd's crook herding a flock into a corral">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#0f172a"/>
-      <stop offset="1" stop-color="#1e293b"/>
+      <stop offset="1" stop-color="#16202f"/>
     </linearGradient>
-    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+    <linearGradient id="crook" x1="0" y1="1" x2="1" y2="0">
       <stop offset="0" stop-color="#38bdf8"/>
       <stop offset="1" stop-color="#2dd4bf"/>
     </linearGradient>
-    <linearGradient id="active" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#34d399"/>
-      <stop offset="1" stop-color="#22d3ee"/>
+    <linearGradient id="wool" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#cbd5e1"/>
     </linearGradient>
   </defs>
 
-  <!-- rounded dock shell -->
-  <rect x="56" y="64" width="400" height="384" rx="56" fill="url(#bg)" stroke="#334155" stroke-width="6"/>
+  <!-- rounded corral / dock shell -->
+  <rect x="56" y="64" width="400" height="384" rx="64" fill="url(#bg)" stroke="#334155" stroke-width="6"/>
 
-  <!-- shared branch line threading behind the tiles -->
-  <line x1="128" y1="232" x2="384" y2="232" stroke="#475569" stroke-width="12" stroke-linecap="round"/>
+  <!-- shepherd's crook: a continuous staff that rises from the bottom-left, arcs across the top,
+       and curls into a spiral hook at the upper-right — cradling the flock below-left. -->
+  <path d="M120 412 C120 176 148 140 236 132 C300 126 344 156 352 208 C358 246 336 268 306 268 C288 268 278 254 284 240"
+        fill="none" stroke="url(#crook)" stroke-width="26" stroke-linecap="round"/>
 
-  <!-- three repository tiles on the dock -->
-  <rect x="128" y="200" width="72" height="72" rx="18" fill="url(#tile)"/>
-  <rect x="220" y="184" width="72" height="88" rx="18" fill="url(#active)" stroke="#34d399" stroke-width="4"/>
-  <rect x="312" y="200" width="72" height="72" rx="18" fill="url(#tile)"/>
-
-  <!-- glyphs (agent panes) inside each tile -->
-  <rect x="146" y="232" width="36" height="8" rx="4" fill="#0f172a" opacity="0.9"/>
-  <rect x="146" y="244" width="24" height="8" rx="4" fill="#0f172a" opacity="0.7"/>
-
-  <rect x="234" y="206" width="44" height="10" rx="5" fill="#0f172a" opacity="0.9"/>
-  <rect x="234" y="220" width="30" height="10" rx="5" fill="#0f172a" opacity="0.75"/>
-  <rect x="234" y="234" width="38" height="10" rx="5" fill="#0f172a" opacity="0.6"/>
-
-  <rect x="330" y="232" width="36" height="8" rx="4" fill="#0f172a" opacity="0.9"/>
-  <rect x="330" y="244" width="24" height="8" rx="4" fill="#0f172a" opacity="0.7"/>
-
-  <!-- dock tray / base bar the tiles sit on -->
-  <rect x="120" y="344" width="272" height="26" rx="13" fill="#334155"/>
-  <rect x="236" y="348" width="40" height="18" rx="9" fill="#64748b"/>
+  <!-- flock: three sheep gathered under the crook -->
+  <g>
+    <!-- sheep 1 (left) -->
+    <g transform="translate(150 350)">
+      <g transform="rotate(5 34 22)">
+        <ellipse cx="34" cy="22" rx="34" ry="23" fill="url(#wool)"/>
+        <rect x="55" y="6" width="28" height="28" rx="9" fill="#475569"/>
+        <path d="M57 6 q-8 -14 2 -17 q8 -3 10 6 z" fill="#64748b"/>
+        <path d="M55 28 q-12 10 6 12" stroke="#64748b" stroke-width="4" fill="none" stroke-linecap="round"/>
+        <circle cx="67" cy="19" r="3" fill="#0f172a"/>
+        <path d="M14 42 v14 M30 42 v14 M46 42 v14 M60 42 v14" stroke="#64748b" stroke-width="9" stroke-linecap="round"/>
+      </g>
+    </g>
+    <!-- sheep 2 (middle) -->
+    <g transform="translate(254 358)">
+      <g transform="rotate(3 30 20)">
+        <ellipse cx="30" cy="20" rx="30" ry="21" fill="url(#wool)"/>
+        <rect x="49" y="4" width="26" height="26" rx="8" fill="#475569"/>
+        <path d="M51 4 q-7 -12 2 -16 q8 -3 9 5 z" fill="#64748b"/>
+        <path d="M49 26 q-11 9 6 11" stroke="#64748b" stroke-width="4" fill="none" stroke-linecap="round"/>
+        <circle cx="60" cy="15" r="3" fill="#0f172a"/>
+        <path d="M12 38 v12 M26 38 v12 M42 38 v12 M54 38 v12" stroke="#64748b" stroke-width="8" stroke-linecap="round"/>
+      </g>
+    </g>
+    <!-- sheep 3 (right) -->
+    <g transform="translate(342 366)">
+      <g transform="rotate(2 26 18)">
+        <ellipse cx="26" cy="18" rx="26" ry="19" fill="url(#wool)"/>
+        <rect x="43" y="3" width="24" height="24" rx="8" fill="#475569"/>
+        <path d="M45 3 q-6 -11 2 -15 q7 -3 8 5 z" fill="#64748b"/>
+        <path d="M43 24 q-10 8 6 10" stroke="#64748b" stroke-width="4" fill="none" stroke-linecap="round"/>
+        <circle cx="53" cy="13" r="3" fill="#0f172a"/>
+        <path d="M10 34 v10 M22 34 v10 M36 34 v10 M47 34 v10" stroke="#64748b" stroke-width="7" stroke-linecap="round"/>
+      </g>
+    </g>
+  </g>
 </svg>

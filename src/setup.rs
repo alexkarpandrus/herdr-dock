@@ -1,5 +1,5 @@
-use crate::git::message;
 use crate::Result;
+use crate::git::message;
 use std::{
     env, fs,
     io::{self, IsTerminal},

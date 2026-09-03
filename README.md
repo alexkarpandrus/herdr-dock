@@ -4,9 +4,9 @@
 
 # herdr-dock
 
-**One coordinated workspace across many Git repositories — for Herdr.**
+**Herds your repositories into one pen — for Herdr.**
 
-`herdr-dock` turns a set of related repositories into a single, resumable agent workspace: it creates sibling Git worktrees on a shared branch, writes shared agent guides, opens one Herdr tab per repository, and remembers everything so you can resume it later.
+`herdr-dock` rounds up a set of related repositories and folds them into a single, resumable agent workspace: it creates sibling Git worktrees on a shared branch, writes shared `AGENTS.md`/`CLAUDE.md` guides, opens one Herdr tab per repository, and remembers everything so you can pick the whole flock back up where you left off.
 
 </div>
 
@@ -25,39 +25,18 @@
 
 ## Demo
 
-Watch the whole flow — name a project, pick repositories, choose a base ref, review, and create — in one pass.
+Name a project, pick repositories, choose a base ref, review, and create. The dock lands as sibling worktrees with a shared agent guide, and the overview keeps its color-coded project statuses, dirty counts, and live commit subjects — open it, focus a dock, or resume right where you left off.
 
 <p align="center">
-  <img src="docs/herdr-dock-demo.gif" alt="herdr-dock create flow demo" width="900" />
+  <img src="docs/herdr-dock-demo.gif" alt="herdr-dock create flow, workspace, and overview demo" width="900" />
 </p>
 
-### Screenshots
-
-**1. Name the project** — the branch slug is previewed as you type.
-
-<p align="center"><img src="docs/shot-02-branch-slug.png" alt="Create dock: project name" width="760" /></p>
-
-**2. Pick repositories** — a saved quick list stays on top; type to search configured roots.
-
-<p align="center"><img src="docs/shot-03-repositories.png" alt="Create dock: repository picker" width="760" /></p>
-
-<p align="center"><img src="docs/shot-04-repo-selected.png" alt="Create dock: repository selected" width="760" /></p>
-
-**3. Discovery** — fuzzy search finds Git repositories under your configured roots and remembers them for next time.
-
-<p align="center"><img src="docs/shot-09-repo-search-found.png" alt="Create dock: repository search" width="760" /></p>
-
-**4. Choose a base ref** — branches and remote refs filter as you type; `Tab` applies one ref to every repository.
-
-<p align="center"><img src="docs/shot-06-base-ref.png" alt="Create dock: base ref picker" width="760" /></p>
-
-**5. Review and create** — confirm the branch, root, and per-repository plans; the worktrees and shared `AGENTS.md`/`CLAUDE.md` are written on commit.
-
-<p align="center"><img src="docs/shot-07-confirm.png" alt="Create dock: confirm" width="760" /></p>
-
-**6. Dock overview** — live Herdr workspace and agent states, dirty counts, and latest commit subjects, with resize-aware color-coded statuses.
-
-<p align="center"><img src="docs/shot-08-overview.png" alt="Dock overview" width="760" /></p>
+1. **Name the project** — the `<prefix>/<slug>` branch is previewed as you type.
+2. **Pick repositories** — a saved quick list stays on top; type to search configured roots.
+3. **Choose a base ref** — branches and remote refs filter as you type; `Tab` applies one ref to every repository.
+4. **Review and create** — confirm the branch, root, and per-repository plans.
+5. **Workspace** — the dock lands as sibling worktrees with a shared `AGENTS.md`/`CLAUDE.md`, so any agent that arrives knows the whole change.
+6. **Overview** — every dock's live status, dirty count, and latest commit subject in one view.
 
 ---
 
@@ -79,13 +58,13 @@ The `herdr-dock.setup` action writes the recommended keybindings into your Herdr
 
 ---
 
-## Why a dock?
+## Why herd them into a dock?
 
-Running one agent per service gets messy fast: each repo solves its half of a feature, the branches drift, and nobody has the full picture. A dock bundles the whole change together:
+Running one agent per service gets messy fast: each repo solves its half of a feature, the branches drift, and nobody has the full picture. A dock rounds the whole change up into one pen:
 
 - **One shared branch** across every repository, so the work stays in lockstep.
-- **Sibling worktrees**, so your main checkouts stay clean and yours to use.
-- **A shared root** with `AGENTS.md`/`CLAUDE.md` describing the workspace to any agent that lands there.
+- **Sibling worktrees** — lambs on their own lead, so your main checkouts stay clean and yours to use.
+- **A shared root** with `AGENTS.md`/`CLAUDE.md` describing the workspace to any agent that arrives.
 - **One workspace, many tabs** — a tab per repository plus a `shared` tab for the cross-cutting view.
 - **Resumable sessions** — close the dock and Herdr keeps the session IDs, so reopening gets back to work, not to square one.
 

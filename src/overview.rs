@@ -1,3 +1,4 @@
+use crate::Result;
 use crate::archive::archive_dock;
 use crate::dock::{
     check_dock_session, ensure_no_live_legacy_workspace, legacy_workspace_is_live, reopen_dock,
@@ -6,14 +7,13 @@ use crate::dock::{
 use crate::git::optional_git;
 use crate::herdr::{current_herdr_session, herdr, live_workspaces};
 use crate::model::{
-    load_state, lock_state, save_state, AgentOverview, DockOverview, DockRecord, LiveWorkspace,
-    RepositoryOverview, State,
+    AgentOverview, DockOverview, DockRecord, LiveWorkspace, RepositoryOverview, State, load_state,
+    lock_state, save_state,
 };
 use crate::repos::required_directory;
 use crate::ui::{
-    confirm_archive, confirm_complete, plain, read_key, show_notice, styled, Segment, Ui,
+    Segment, Ui, confirm_archive, confirm_complete, plain, read_key, show_notice, styled,
 };
-use crate::Result;
 use crossterm::event::KeyCode;
 use crossterm::style::Color;
 use crossterm::terminal;
