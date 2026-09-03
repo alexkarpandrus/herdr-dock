@@ -1,6 +1,65 @@
+<div align="center">
+
+<img src="docs/logo.svg" alt="herdr-dock logo" width="140" />
+
 # herdr-dock
 
-A [Herdr](https://herdr.dev) plugin for creating one coordinated workspace across multiple Git repositories.
+**One coordinated workspace across many Git repositories — for Herdr.**
+
+`herdr-dock` turns a set of related repositories into a single, resumable agent workspace: it creates sibling Git worktrees on a shared branch, writes shared agent guides, opens one Herdr tab per repository, and remembers everything so you can resume it later.
+
+</div>
+
+---
+
+<p align="center">
+  <a href="https://github.com/alexkarpandrus/herdr-dock/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/alexkarpandrus/herdr-dock/ci.yml?branch=main&label=CI&style=flat-square" alt="CI status" /></a>
+  <a href="https://crates.io/"><img src="https://img.shields.io/badge/rust-1.89%2B-orange?style=flat-square&logo=rust" alt="Rust 1.89+" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License MIT" /></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-1f2937?style=flat-square" alt="macOS & Linux" />
+  <img src="https://img.shields.io/badge/Herdr-%E2%89%A50.8.2-7c3aed?style=flat-square" alt="Herdr ≥0.8.2" />
+  <img src="https://img.shields.io/badge/plugin-action-create%20%7C%20overview%20%7C%20setup-0ea5e9?style=flat-square" alt="Plugin actions" />
+</p>
+
+---
+
+## Demo
+
+Watch the whole flow — name a project, pick repositories, choose a base ref, review, and create — in one pass.
+
+<p align="center">
+  <img src="docs/herdr-dock-demo.gif" alt="herdr-dock create flow demo" width="900" />
+</p>
+
+### Screenshots
+
+**1. Name the project** — the branch slug is previewed as you type.
+
+<p align="center"><img src="docs/shot-02-branch-slug.png" alt="Create dock: project name" width="760" /></p>
+
+**2. Pick repositories** — a saved quick list stays on top; type to search configured roots.
+
+<p align="center"><img src="docs/shot-03-repositories.png" alt="Create dock: repository picker" width="760" /></p>
+
+<p align="center"><img src="docs/shot-04-repo-selected.png" alt="Create dock: repository selected" width="760" /></p>
+
+**3. Discovery** — fuzzy search finds Git repositories under your configured roots and remembers them for next time.
+
+<p align="center"><img src="docs/shot-09-repo-search-found.png" alt="Create dock: repository search" width="760" /></p>
+
+**4. Choose a base ref** — branches and remote refs filter as you type; `Tab` applies one ref to every repository.
+
+<p align="center"><img src="docs/shot-06-base-ref.png" alt="Create dock: base ref picker" width="760" /></p>
+
+**5. Review and create** — confirm the branch, root, and per-repository plans; the worktrees and shared `AGENTS.md`/`CLAUDE.md` are written on commit.
+
+<p align="center"><img src="docs/shot-07-confirm.png" alt="Create dock: confirm" width="760" /></p>
+
+**6. Dock overview** — live Herdr workspace and agent states, dirty counts, and latest commit subjects, with resize-aware color-coded statuses.
+
+<p align="center"><img src="docs/shot-08-overview.png" alt="Dock overview" width="760" /></p>
+
+---
 
 ## What it does
 
@@ -15,6 +74,22 @@ The `herdr-dock.create` action opens a terminal popup that:
 7. opens one Herdr tab per repository, plus a `shared` tab when multiple repositories are selected.
 
 The `herdr-dock.overview` action shows saved dock history with live Herdr workspace and agent states, dirty repository counts, and latest commit subjects. Press Enter to focus an open dock or reopen a closed dock and resume its saved agent sessions. Press `D` to close a dock and mark it done. Press `A` to archive and remove clean worktrees.
+
+The `herdr-dock.setup` action writes the recommended keybindings into your Herdr configuration.
+
+---
+
+## Why a dock?
+
+Running one agent per service gets messy fast: each repo solves its half of a feature, the branches drift, and nobody has the full picture. A dock bundles the whole change together:
+
+- **One shared branch** across every repository, so the work stays in lockstep.
+- **Sibling worktrees**, so your main checkouts stay clean and yours to use.
+- **A shared root** with `AGENTS.md`/`CLAUDE.md` describing the workspace to any agent that lands there.
+- **One workspace, many tabs** — a tab per repository plus a `shared` tab for the cross-cutting view.
+- **Resumable sessions** — close the dock and Herdr keeps the session IDs, so reopening gets back to work, not to square one.
+
+---
 
 ## Persistence and lifecycle
 
@@ -50,6 +125,8 @@ The overview refreshes this metadata from Herdr. Enter focuses a live workspace.
 `D` asks for confirmation, snapshots the latest agent metadata, closes the selected workspace and all its tabs and processes, keeps the worktrees, and sets the dock status to `done`. It does not stop the named Herdr server because that could stop unrelated workspaces. Reopening clears the completion time and makes the dock active again.
 
 `A` remains the destructive archive action. It refuses worktrees with tracked, untracked, or ignored files, rejects symbolic links and relocated worktrees, closes an open workspace, removes verified worktrees, and keeps the Git branches and archived history record.
+
+---
 
 ## Install
 
@@ -87,6 +164,8 @@ herdr plugin link "$PWD" --enabled
 ```
 
 The local link uses the existing binary. Run `cargo build --release` again after source changes.
+
+---
 
 ## Configure repositories
 
@@ -128,6 +207,8 @@ Run the create action after saving the configuration:
 herdr plugin action invoke create --plugin herdr-dock
 ```
 
+---
+
 ## Bind a hotkey
 
 Add a plugin action binding to your Herdr user configuration:
@@ -148,6 +229,14 @@ description = "show dock overview"
 
 With Herdr's default `ctrl+b` prefix, press `ctrl+b`, then `d` to create a dock or `ctrl+b`, then `o` to open the overview. Herdr plugin v1 cannot register keybindings from a plugin manifest, so users must add these bindings to their Herdr configuration.
 
+You can also add them automatically with:
+
+```sh
+herdr plugin action invoke setup --plugin herdr-dock
+```
+
+---
+
 ## Development
 
 ```sh
@@ -155,6 +244,8 @@ cargo test
 HERDR_DOCK_TEST_WORKTRUNK=1 cargo test real_worktrunk_lifecycle_when_enabled -- --nocapture
 cargo clippy --all-targets -- -D warnings
 ```
+
+---
 
 ## License
 

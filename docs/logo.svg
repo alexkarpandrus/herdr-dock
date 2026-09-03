@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="herdr-dock logo">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset="1" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#2dd4bf"/>
+    </linearGradient>
+    <linearGradient id="active" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34d399"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded dock shell -->
+  <rect x="56" y="64" width="400" height="384" rx="56" fill="url(#bg)" stroke="#334155" stroke-width="6"/>
+
+  <!-- shared branch line threading behind the tiles -->
+  <line x1="128" y1="232" x2="384" y2="232" stroke="#475569" stroke-width="12" stroke-linecap="round"/>
+
+  <!-- three repository tiles on the dock -->
+  <rect x="128" y="200" width="72" height="72" rx="18" fill="url(#tile)"/>
+  <rect x="220" y="184" width="72" height="88" rx="18" fill="url(#active)" stroke="#34d399" stroke-width="4"/>
+  <rect x="312" y="200" width="72" height="72" rx="18" fill="url(#tile)"/>
+
+  <!-- glyphs (agent panes) inside each tile -->
+  <rect x="146" y="232" width="36" height="8" rx="4" fill="#0f172a" opacity="0.9"/>
+  <rect x="146" y="244" width="24" height="8" rx="4" fill="#0f172a" opacity="0.7"/>
+
+  <rect x="234" y="206" width="44" height="10" rx="5" fill="#0f172a" opacity="0.9"/>
+  <rect x="234" y="220" width="30" height="10" rx="5" fill="#0f172a" opacity="0.75"/>
+  <rect x="234" y="234" width="38" height="10" rx="5" fill="#0f172a" opacity="0.6"/>
+
+  <rect x="330" y="232" width="36" height="8" rx="4" fill="#0f172a" opacity="0.9"/>
+  <rect x="330" y="244" width="24" height="8" rx="4" fill="#0f172a" opacity="0.7"/>
+
+  <!-- dock tray / base bar the tiles sit on -->
+  <rect x="120" y="344" width="272" height="26" rx="13" fill="#334155"/>
+  <rect x="236" y="348" width="40" height="18" rx="9" fill="#64748b"/>
+</svg>
