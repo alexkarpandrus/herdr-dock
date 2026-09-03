@@ -56,7 +56,7 @@ The overview refreshes this metadata from Herdr. Enter focuses a live workspace.
 ### Quick start
 
 ```sh
-# 1. Install — downloads the repository and builds it with Cargo
+# 1. Install — downloads the repository, builds with Cargo, or fetches a prebuilt binary
 herdr plugin install alexkarpandrus/herdr-dock
 
 # 2. Add repositories — the config file is created on your first run
@@ -73,7 +73,7 @@ Requirements:
 - macOS or Linux;
 - [Herdr](https://herdr.dev) 0.8.2 or newer;
 - Git; and
-- Rust 1.89 or newer and Cargo, because `herdr plugin install` builds from source.
+- Rust 1.89 and Cargo only to build from source; otherwise a prebuilt binary is fetched from GitHub Releases (macOS arm64/x86_64, Linux x86_64).
 
 ### Link a local checkout
 

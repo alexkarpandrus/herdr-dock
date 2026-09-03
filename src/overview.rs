@@ -4,7 +4,7 @@ use crate::dock::{
     check_dock_session, ensure_no_live_legacy_workspace, legacy_workspace_is_live, reopen_dock,
     sync_dock_agents,
 };
-use crate::git::{message, optional_git};
+use crate::git::optional_git;
 use crate::herdr::{current_herdr_session, herdr, live_workspaces};
 use crate::model::{
     AgentOverview, DockOverview, DockRecord, LiveWorkspace, RepositoryOverview, State, load_state,
@@ -42,13 +42,42 @@ fn status_segment(status: &str) -> Segment {
 
 fn overview_hint(dock: &DockOverview) -> String {
     if dock.archived {
-        "↑/↓ select · / filter · R refresh · Esc close".into()
+        "↑/↓ select · / filter · R refresh · ? help · Esc close".into()
     } else if dock.done {
-        "↑/↓ select · Enter reopen · A archive · / filter · R refresh · Esc close".into()
+        "↑/↓ select · Enter reopen · A archive · / filter · R refresh · ? help · Esc close".into()
     } else {
-        "↑/↓ select · Enter focus/reopen · D close · A archive · / filter · R refresh · Esc close"
+        "↑/↓ select · Enter focus/reopen · D close · A archive · / filter · R refresh · ? help · Esc close"
             .into()
     }
+}
+
+fn show_help(ui: &mut Ui) -> Result<()> {
+    let lines = vec![
+        vec![plain("Keys")],
+        vec![plain(
+            "  ↑/↓ select    Enter focus/reopen    D close    A archive",
+        )],
+        vec![plain(
+            "  / filter      R refresh             Esc close  ? help",
+        )],
+        vec![plain(String::new())],
+        vec![plain("Status colors")],
+        vec![
+            styled(Color::Green, "  working · clean"),
+            plain("        "),
+            styled(Color::Yellow, "dirty · idle · unavailable"),
+        ],
+        vec![
+            styled(Color::Red, "  missing"),
+            plain("          "),
+            styled(Color::DarkGrey, "done · archived · closed · saved"),
+        ],
+        vec![plain(String::new())],
+        vec![plain("Press any key to close.")],
+    ];
+    ui.frame_styled("Dock overview · help", &lines)?;
+    read_key()?;
+    Ok(())
 }
 pub(crate) fn show_overview() -> Result<()> {
     let state_dir = required_directory("HERDR_PLUGIN_STATE_DIR")?;
@@ -56,7 +85,23 @@ pub(crate) fn show_overview() -> Result<()> {
     let _state_lock = lock_state(&state_path)?;
     let mut state = load_state(&state_path)?;
     if state.docks.is_empty() {
-        return Err(message("no docks have been created yet"));
+        let mut ui = Ui::start()?;
+        ui.frame(
+            "Dock overview",
+            &[
+                "No docks yet.".into(),
+                String::new(),
+                "Create one with prefix+d, or run:".into(),
+                "  herdr plugin action invoke create --plugin herdr-dock".into(),
+                String::new(),
+                "Add the hotkeys with:".into(),
+                "  herdr plugin action invoke setup --plugin herdr-dock".into(),
+                String::new(),
+                "Press any key to close.".into(),
+            ],
+        )?;
+        read_key()?;
+        return Ok(());
     }
 
     let current_session = current_herdr_session()?;
@@ -175,6 +220,8 @@ pub(crate) fn show_overview() -> Result<()> {
             }
             KeyCode::Esc => return Ok(()),
             KeyCode::Char('/') if !filtering => filtering = true,
+
+            KeyCode::Char('?') if !filtering => show_help(&mut ui)?,
             KeyCode::Enter if filtering => filtering = false,
             KeyCode::Backspace if filtering => {
                 filter.pop();

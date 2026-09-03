@@ -7,6 +7,7 @@ mod model;
 mod overview;
 mod prompts;
 mod repos;
+mod setup;
 mod ui;
 mod worktrees;
 
@@ -35,8 +36,9 @@ fn run() -> Result<()> {
         Some("open") => open_popup(env::args().nth(2).as_deref().unwrap_or("create")),
         Some("create") => crate::create::create_dock(),
         Some("overview") => crate::overview::show_overview(),
+        Some("setup") => crate::setup::setup(),
         _ => Err(crate::git::message(
-            "expected `open`, `create`, or `overview`",
+            "expected `open`, `create`, `overview`, or `setup`",
         )),
     }
 }
