@@ -14,21 +14,21 @@ if command -v cargo >/dev/null 2>&1; then
 fi
 
 case "$(uname -s)" in
-    Darwin) os="apple-darwin" ;;
-    Linux)  os="unknown-linux-gnu" ;;
-    *)
-        echo "herdr-dock: unsupported platform $(uname -s)" >&2
-        exit 1
-        ;;
+Darwin) os="apple-darwin" ;;
+Linux) os="unknown-linux-gnu" ;;
+*)
+    echo "herdr-dock: unsupported platform $(uname -s)" >&2
+    exit 1
+    ;;
 esac
 
 case "$(uname -m)" in
-    x86_64|amd64) arch="x86_64" ;;
-    arm64|aarch64) arch="aarch64" ;;
-    *)
-        echo "herdr-dock: unsupported architecture $(uname -m)" >&2
-        exit 1
-        ;;
+x86_64 | amd64) arch="x86_64" ;;
+arm64 | aarch64) arch="aarch64" ;;
+*)
+    echo "herdr-dock: unsupported architecture $(uname -m)" >&2
+    exit 1
+    ;;
 esac
 
 target="$arch-$os"
