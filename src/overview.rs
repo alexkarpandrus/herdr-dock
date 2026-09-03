@@ -1,7 +1,8 @@
 use crate::Result;
+use crate::archive::archive_dock;
 use crate::dock::{
-    archive_dock, check_dock_session, ensure_no_live_legacy_workspace, legacy_workspace_is_live,
-    reopen_dock, sync_dock_agents,
+    check_dock_session, ensure_no_live_legacy_workspace, legacy_workspace_is_live, reopen_dock,
+    sync_dock_agents,
 };
 use crate::git::{message, optional_git};
 use crate::herdr::{current_herdr_session, herdr, live_workspaces};

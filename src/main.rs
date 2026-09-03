@@ -1,8 +1,11 @@
+mod archive;
+mod create;
 mod dock;
 mod git;
 mod herdr;
 mod model;
 mod overview;
+mod prompts;
 mod repos;
 mod ui;
 mod worktrees;
@@ -30,7 +33,7 @@ fn main() {
 fn run() -> Result<()> {
     match env::args().nth(1).as_deref() {
         Some("open") => open_popup(env::args().nth(2).as_deref().unwrap_or("create")),
-        Some("create") => crate::dock::create_dock(),
+        Some("create") => crate::create::create_dock(),
         Some("overview") => crate::overview::show_overview(),
         _ => Err(crate::git::message(
             "expected `open`, `create`, or `overview`",
@@ -64,11 +67,14 @@ fn open_popup(entrypoint: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use crate::Result;
+    use crate::archive::*;
+    use crate::create::*;
     use crate::dock::*;
     use crate::git::*;
     use crate::herdr::*;
     use crate::model::*;
     use crate::overview::*;
+    use crate::prompts::*;
     use crate::repos::*;
     use crate::ui::*;
     use crate::worktrees::*;
