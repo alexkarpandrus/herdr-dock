@@ -52,7 +52,7 @@ The `herdr-dock.create` action opens a terminal popup that:
 6. writes the goal and repository map to shared `AGENTS.md` and `CLAUDE.md` files; and
 7. opens a `root` tab plus one tab per repository; the root can start and communicate with child agents in any repository.
 
-The `herdr-dock.overview` action opens a kanban board with Working, Closed, Done, and optional Archived columns. Press Enter to focus or reopen a dock, `E` to add repositories, `D` to mark it done and close its workspace, `A` to archive and remove clean worktrees, or `H` to show and hide archived docks. The detail pane shows the goal, branch, root, Herdr session, agents, and repositories.
+The `herdr-dock.overview` action opens a kanban board with Working, Closed, Done, and optional Archived columns. Cards show root-session status and child-session counts. Press Enter to focus or reopen a dock, `E` to add repositories, `D` to mark it done and close its workspace, `A` to archive and remove clean worktrees, or `H` to show and hide archived docks. The detail pane expands the root and child session tree plus repository status.
 
 The `herdr-dock.setup` action writes the recommended keybindings into your Herdr configuration.
 
@@ -84,11 +84,11 @@ Each dock record stores its goal, Herdr session, workspace ID, tabs, repositorie
   "workspace_id": "w1",
   "goal": "Ship OAuth login across API and web",
   "completed_at_unix": 1740000000,
-  "tabs": [{"label": "api", "cwd": "/work/dock/api"}],
+  "tabs": [{"label": "root", "cwd": "/work/dock"}, {"label": "api", "cwd": "/work/dock/api"}],
   "agents": [{
-    "name": "reviewer",
+    "name": "root",
     "kind": "codex",
-    "cwd": "/work/dock/api",
+    "cwd": "/work/dock",
     "tab": 0,
     "session": {
       "source": "herdr:codex",
@@ -100,7 +100,7 @@ Each dock record stores its goal, Herdr session, workspace ID, tabs, repositorie
 }
 ```
 
-The overview refreshes this metadata from Herdr. Enter focuses a live workspace or recreates a closed workspace and resumes supported agent sessions. `E` adds repositories on the dock branch and adds tabs to a live workspace.
+The overview refreshes this metadata from Herdr and displays the root session above its children. Enter focuses a live workspace or recreates a closed workspace, resumes the root first, and then resumes supported child sessions. Missing or unsupported sessions are reported without blocking the remaining sessions. `E` adds repositories on the dock branch and adds tabs to a live workspace.
 
 `D` marks the dock done and closes its workspace, tabs, and processes. Worktrees and resumable agent sessions remain. Reopening clears the completion time.
 

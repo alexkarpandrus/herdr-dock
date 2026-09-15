@@ -313,7 +313,7 @@ fn board_lines(
     lines
 }
 
-fn card_lines(dock: &DockOverview, width: usize, selected: bool) -> Vec<Vec<Segment>> {
+pub(crate) fn card_lines(dock: &DockOverview, width: usize, selected: bool) -> Vec<Vec<Segment>> {
     let inner = width.saturating_sub(4);
     let accent = if selected {
         Color::Cyan
@@ -340,14 +340,29 @@ fn card_lines(dock: &DockOverview, width: usize, selected: bool) -> Vec<Vec<Segm
     ));
     status_row.push(plain("│"));
 
+    let root = dock.agents.iter().find(|agent| agent.is_root);
+    let root_summary = root
+        .map(|agent| format!("root · {} · {}", agent.kind, agent.status))
+        .unwrap_or_else(|| "root · no agent".into());
+    let root_summary = truncate(&root_summary, inner.saturating_sub(1));
+    let mut root_row: Vec<Segment> = vec![plain("│ ")];
+    root_row.push(match root.and_then(|agent| status_color(&agent.status)) {
+        Some(color) => styled(color, &root_summary),
+        None => plain(&root_summary),
+    });
+    root_row.push(plain(
+        " ".repeat(inner.saturating_sub(root_summary.chars().count() + 1)),
+    ));
+    root_row.push(plain("│"));
+
     let dirty = dirty_count(dock);
-    let agents = dock.agents.len();
+    let children = dock.agents.iter().filter(|agent| !agent.is_root).count();
     let summary = format!(
-        "{} repos · {} dirty · {} agent{}",
+        "{} repos · {} dirty · {} child{}",
         dock.repositories.len(),
         dirty,
-        agents,
-        if agents == 1 { "" } else { "s" }
+        children,
+        if children == 1 { "" } else { "ren" }
     );
     let summary = truncate(&summary, inner.saturating_sub(1));
     let mut summary_row: Vec<Segment> = vec![plain("│ ")];
@@ -372,14 +387,28 @@ fn card_lines(dock: &DockOverview, width: usize, selected: bool) -> Vec<Vec<Segm
     vec![
         title,
         status_row,
+        root_row,
         summary_row,
         branch_row,
         vec![plain("└"), plain("─".repeat(inner)), plain("┘")],
     ]
 }
+fn session_line(prefix: &str, agent: &AgentOverview) -> Vec<Segment> {
+    let session = agent
+        .session
+        .as_ref()
+        .map(|session| session.value.as_str())
+        .unwrap_or("unavailable");
+    vec![
+        plain(format!("{prefix}{}", agent.name)),
+        plain(format!(" ({}) [", agent.kind)),
+        status_segment(&agent.status),
+        plain(format!("] · {} · session {session}", agent.cwd)),
+    ]
+}
 
 /// Detail pane for the selected dock, shown below the kanban board.
-fn detail_lines(dock: &DockOverview) -> Vec<Vec<Segment>> {
+pub(crate) fn detail_lines(dock: &DockOverview) -> Vec<Vec<Segment>> {
     let mut lines: Vec<Vec<Segment>> = Vec::new();
     if let Some(goal) = &dock.goal {
         lines.push(vec![plain(format!("Goal: {goal}"))]);
@@ -391,22 +420,29 @@ fn detail_lines(dock: &DockOverview) -> Vec<Vec<Segment>> {
         dock.herdr_session.as_deref().unwrap_or("current/legacy")
     ))]);
     lines.push(vec![plain(String::new())]);
-    lines.push(vec![plain("Agents")]);
-    if dock.agents.is_empty() {
-        lines.push(vec![plain("  none")]);
+    lines.push(vec![plain("Sessions")]);
+    if let Some(root) = dock.agents.iter().find(|agent| agent.is_root) {
+        lines.push(session_line("  root · ", root));
     } else {
-        for agent in &dock.agents {
-            let session = agent
-                .session
-                .as_ref()
-                .map(|session| session.value.as_str())
-                .unwrap_or("unavailable");
-            lines.push(vec![
-                plain(format!("  {}", agent.name)),
-                plain(format!(" ({}) [", agent.kind)),
-                status_segment(&agent.status),
-                plain(format!("] · {} · session {session}", agent.cwd)),
-            ]);
+        lines.push(vec![plain("  root · no agent")]);
+    }
+    let children = dock
+        .agents
+        .iter()
+        .filter(|agent| !agent.is_root)
+        .collect::<Vec<_>>();
+    if children.is_empty() {
+        lines.push(vec![plain("  └─ no child sessions")]);
+    } else {
+        for (index, agent) in children.iter().enumerate() {
+            lines.push(session_line(
+                if index + 1 == children.len() {
+                    "  └─ "
+                } else {
+                    "  ├─ "
+                },
+                agent,
+            ));
         }
     }
     lines.push(vec![plain(String::new())]);
@@ -709,6 +745,51 @@ pub(crate) fn collect_overview(
     }
     Ok(build_overview(&state.docks, &live, current_session))
 }
+fn mark_root_agent(
+    record: &DockRecord,
+    workspace: Option<&LiveWorkspace>,
+    agents: &mut [AgentOverview],
+) {
+    agents.iter_mut().for_each(|agent| agent.is_root = false);
+    let live_root_tab = workspace
+        .and_then(|workspace| {
+            workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.label == "root" || Path::new(&tab.cwd) == record.root)
+                .or_else(|| workspace.tabs.first())
+        })
+        .map(|tab| tab.id.as_str());
+    let saved_root_tab = record
+        .tabs
+        .iter()
+        .position(|tab| tab.label == "root" || tab.cwd == record.root)
+        .unwrap_or(0);
+    let root = live_root_tab
+        .and_then(|tab_id| {
+            agents
+                .iter()
+                .position(|agent| agent.tab_id.as_deref() == Some(tab_id))
+        })
+        .or_else(|| {
+            if workspace.is_none() {
+                record
+                    .agents
+                    .iter()
+                    .position(|agent| agent.tab == Some(saved_root_tab) || agent.cwd == record.root)
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            agents
+                .iter()
+                .position(|agent| Path::new(&agent.cwd) == record.root)
+        });
+    if let Some(root) = root {
+        agents[root].is_root = true;
+    }
+}
 pub(crate) fn build_overview(
     records: &[DockRecord],
     live: &BTreeMap<String, LiveWorkspace>,
@@ -771,7 +852,7 @@ pub(crate) fn build_overview(
                     }
                 })
                 .collect();
-            let agents = workspace.map_or_else(
+            let mut agents = workspace.map_or_else(
                 || {
                     record
                         .agents
@@ -782,6 +863,7 @@ pub(crate) fn build_overview(
                             status: if done { "done" } else { "saved" }.into(),
                             cwd: agent.cwd.to_string_lossy().into(),
                             tab_id: None,
+                            is_root: false,
                             launch_name: agent.name.clone(),
                             session: agent.session.clone(),
                         })
@@ -789,6 +871,7 @@ pub(crate) fn build_overview(
                 },
                 |workspace| workspace.agents.clone(),
             );
+            mark_root_agent(record, workspace, &mut agents);
             DockOverview {
                 record_index,
                 name: record.name.clone(),

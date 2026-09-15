@@ -322,10 +322,67 @@ mod tests {
             agent_resume_arguments(&state.docks[0].agents[0]),
             Some(vec!["resume".into(), "session-123".into()])
         );
+        state.docks[0].tabs = vec![
+            DockTab {
+                label: "root".into(),
+                cwd: temporary.clone(),
+            },
+            DockTab {
+                label: "api".into(),
+                cwd: temporary.join("api"),
+            },
+        ];
+        state.docks[0].agents.insert(
+            0,
+            DockAgent {
+                name: Some("api-child".into()),
+                kind: "pi".into(),
+                cwd: temporary.join("api"),
+                tab: Some(1),
+                session: None,
+            },
+        );
+        assert_eq!(agent_resume_order(&state.docks[0]), [1, 0]);
         state.docks[0].completed_at_unix = Some(2);
         let overview = build_overview(&state.docks, &BTreeMap::new(), Some("default"));
         assert_eq!(overview[0].status, "done");
         assert_eq!(overview[0].agents[0].status, "done");
+        assert_eq!(
+            overview[0]
+                .agents
+                .iter()
+                .find(|agent| agent.is_root)
+                .map(|agent| agent.name.as_str()),
+            Some("reviewer")
+        );
+        assert_eq!(
+            overview[0]
+                .agents
+                .iter()
+                .filter(|agent| agent.is_root)
+                .count(),
+            1
+        );
+        let display_text = |lines: Vec<Vec<Segment>>| {
+            lines
+                .into_iter()
+                .map(|line| {
+                    line.into_iter()
+                        .map(|segment| match segment {
+                            Segment::Plain(text) | Segment::Styled(_, text) => text,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let card = display_text(card_lines(&overview[0], 34, false));
+        assert!(card.contains("root · codex · done"));
+        assert!(card.contains("1 child"));
+        let detail = display_text(detail_lines(&overview[0]));
+        assert!(detail.contains("root · reviewer"));
+        assert!(detail.contains("└─ api-child"));
 
         let state_path = temporary.join("state.json");
         let first_lock = lock_state(&state_path)?;
@@ -519,6 +576,7 @@ mod tests {
                     status: "working".into(),
                     cwd: root.to_string_lossy().into(),
                     tab_id: None,
+                    is_root: false,
                     launch_name: None,
                     session: None,
                 }],
@@ -529,6 +587,7 @@ mod tests {
         assert!(overview[0].open);
         assert_eq!(overview[0].status, "working");
         assert_eq!(overview[0].agents.len(), 1);
+        assert!(overview[0].agents[0].is_root);
         assert_eq!(
             overview[0]
                 .repositories
