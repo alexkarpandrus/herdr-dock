@@ -475,8 +475,10 @@ mod tests {
         let guide = fs::read_to_string(root.join("AGENTS.md"))?;
         assert!(guide.contains("## Goal\n\nShip OAuth login across API and web"));
         assert!(guide.contains("api"));
-        assert!(guide.contains("herdr agent prompt"));
-        assert!(guide.contains("multiple worker panes"));
+        assert!(guide.contains("The agent in `root` is the root session"));
+        assert!(guide.contains("start child agents in any repository"));
+        assert!(!guide.contains("task and expected report"));
+        assert!(!guide.contains("Do not have workers"));
         assert_eq!(
             fs::read(root.join("AGENTS.md"))?,
             fs::read(root.join("CLAUDE.md"))?
