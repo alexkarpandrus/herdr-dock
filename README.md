@@ -6,7 +6,7 @@
 
 **Herds your repositories into one pen — for Herdr.**
 
-`herdr-dock` rounds up a set of related repositories and folds them into a single, resumable agent workspace: it creates sibling Git worktrees on a shared branch, writes shared `AGENTS.md`/`CLAUDE.md` guides, opens one Herdr tab per repository, and remembers everything so you can pick the whole flock back up where you left off.
+`herdr-dock` rounds up a set of related repositories and folds them into a single, resumable agent workspace: it creates sibling Git worktrees on a shared branch, writes shared `AGENTS.md`/`CLAUDE.md` guides, opens a coordinator root tab plus one repository tab per worktree, and remembers everything so you can pick the whole flock back up where you left off.
 
 </div>
 
@@ -50,7 +50,7 @@ The `herdr-dock.create` action opens a terminal popup that:
 4. selects and remembers a base ref for each repository (`Tab` uses one ref for all);
 5. reviews the branch, root, and repositories, then creates them as sibling Git worktrees;
 6. writes `AGENTS.md` and `CLAUDE.md` in their shared root; and
-7. opens one Herdr tab per repository, plus a `shared` tab when multiple repositories are selected.
+7. opens a coordinator `root` tab plus one worker tab per repository.
 
 The `herdr-dock.overview` action opens a kanban board: one column per status (Working, Closed, Done, Archived), with each dock as a card showing its name, status, tab/repo/dirty/agent counts, and branch. Move with the arrow keys (↑/↓ within a column, ←/→ across columns), press Enter to focus an open dock or reopen a closed dock and resume its saved agent sessions, press `D` to close a dock and mark it done, and press `A` to archive and remove clean worktrees. The pane under the board shows the selected dock's branch, root, Herdr session, agents, and repository details.
 
@@ -65,7 +65,7 @@ Running one agent per service gets messy fast: each repo solves its half of a fe
 - **One shared branch** across every repository, so the work stays in lockstep.
 - **Sibling worktrees** — lambs on their own lead, so your main checkouts stay clean and yours to use.
 - **A shared root** with `AGENTS.md`/`CLAUDE.md` describing the workspace to any agent that arrives.
-- **One workspace, many tabs** — a tab per repository plus a `shared` tab for the cross-cutting view.
+- **One workspace, many tabs and panes** — the `root` tab coordinates work, and each repository tab can host multiple worker panes for parallel tasks.
 - **Resumable sessions** — close the dock and Herdr keeps the session IDs, so reopening gets back to work, not to square one.
 
 ---
@@ -223,6 +223,10 @@ cargo test
 HERDR_DOCK_TEST_WORKTRUNK=1 cargo test real_worktrunk_lifecycle_when_enabled -- --nocapture
 cargo clippy --all-targets -- -D warnings
 ```
+
+### Releases
+
+Use scoped commit messages such as `dock: add root coordinator tabs`. Add exactly one `release:patch`, `release:minor`, or `release:major` label to a pull request that should publish a version. When the pull request merges, the version workflow updates `Cargo.toml`, `Cargo.lock`, and `herdr-plugin.toml` in a `release: vX.Y.Z` commit, creates the tag and GitHub Release with generated notes, and uploads the release binaries. Pull requests without a release label do not publish.
 
 ---
 

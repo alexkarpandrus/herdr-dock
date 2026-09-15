@@ -307,21 +307,23 @@ pub(crate) fn write_agent_guides(
         .collect::<Vec<_>>()
         .join("\n");
     let guide = format!(
-        "# {name}\n\nThis directory is a Herdr dock that groups related Git worktrees.\nAll repositories use branch `{branch}`. Work inside the repository directories, not this root.\n\n## Repositories\n\n{repositories}\n"
+        "# {name}\n\n\
+This directory is a Herdr dock that groups related Git worktrees.\n\
+All repositories use branch `{branch}`. Work inside the repository directories, not this root.\n\n\
+## Repositories\n\n\
+{repositories}\n\n\
+## Agent coordination\n\n\
+The `root` tab is the coordinator. Repository tabs are worker tabs, and each can contain multiple worker panes for independent parallel tasks.\n\
+From the root agent, find workers with `herdr agent list`, delegate with `herdr agent prompt <worker-name> \"<task and expected report>\" --wait`, then read the result with `herdr agent read <worker-name> --source recent-unwrapped --lines 120`.\n\
+For parallel work, prompt each worker without `--wait`, then use `herdr agent wait <worker-name>` before reading each result. Do not have workers edit the same files at the same time. Summarize their results to the user in the root tab.\n"
     );
     fs::write(root.join("AGENTS.md"), &guide)?;
     fs::write(root.join("CLAUDE.md"), guide)?;
     Ok(())
 }
 pub(crate) fn default_dock_tabs(root: &Path, repositories: &[DockRepository]) -> Vec<DockTab> {
-    if repositories.len() == 1 {
-        return vec![DockTab {
-            label: repositories[0].name.clone(),
-            cwd: repositories[0].worktree.clone(),
-        }];
-    }
     let mut tabs = vec![DockTab {
-        label: "shared".into(),
+        label: "root".into(),
         cwd: root.to_path_buf(),
     }];
     tabs.extend(repositories.iter().map(|repository| DockTab {
