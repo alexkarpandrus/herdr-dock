@@ -649,10 +649,9 @@ All repositories use branch `{branch}`. Work inside the repository directories, 
 {goal}\
 ## Repositories\n\n\
 {repositories}\n\n\
-## Agent coordination\n\n\
-The `root` tab is the coordinator. Repository tabs are worker tabs, and each can contain multiple worker panes for independent parallel tasks.\n\
-From the root agent, find workers with `herdr agent list`, delegate with `herdr agent prompt <worker-name> \"<task and expected report>\" --wait`, then read the result with `herdr agent read <worker-name> --source recent-unwrapped --lines 120`.\n\
-For parallel work, prompt each worker without `--wait`, then use `herdr agent wait <worker-name>` before reading each result. Do not have workers edit the same files at the same time. Summarize their results to the user in the root tab.\n"
+## Sessions\n\n\
+The agent in `root` is the root session. It can use Herdr to create or focus tabs and panes, start child agents in any repository, and list, prompt, read, wait for, or focus those agents.\n\
+Repository tabs provide ready working directories; they do not assign roles or prescribe a delegation structure. Use child sessions only when useful.\n"
     );
     fs::write(root.join("AGENTS.md"), &guide)?;
     fs::write(root.join("CLAUDE.md"), guide)?;

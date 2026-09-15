@@ -4,9 +4,9 @@
 
 # herdr-dock
 
-**Create and resume one AI-agent workspace for a change that spans multiple repositories.**
+**One persistent root session for work across repositories, with child sessions whenever needed.**
 
-`herdr-dock` creates sibling Git worktrees on one shared branch, gives every agent the same project goal and repository map, opens a coordinator tab plus one tab per repository, and remembers the workspace for later.
+`herdr-dock` creates sibling Git worktrees on one shared branch, gives the root session the project goal and repository map, prepares one tab per repository, and remembers the complete workspace for later.
 
 </div>
 
@@ -36,7 +36,7 @@ Name the project, state the goal, choose or reuse a branch, pick repositories, r
 3. **Pick repositories** — a saved quick list stays on top; type to search configured roots.
 4. **Choose base refs** — only repositories without the branch need a base; `Tab` applies one ref to every compatible repository.
 5. **Review and create** — existing branches are marked as reused before any worktree is created.
-6. **Workspace and overview** — coordinate from the root tab, add repositories with `E`, and resume the dock later.
+6. **Workspace and overview** — work from the root session, start child sessions when useful, add repositories with `E`, and resume the dock later.
 
 ---
 
@@ -50,7 +50,7 @@ The `herdr-dock.create` action opens a terminal popup that:
 4. selects and remembers base refs only where the target branch does not exist;
 5. reviews which repositories will create or reuse the branch;
 6. writes the goal and repository map to shared `AGENTS.md` and `CLAUDE.md` files; and
-7. opens a coordinator `root` tab plus one worker tab per repository.
+7. opens a `root` tab plus one tab per repository; the root can start and communicate with child agents in any repository.
 
 The `herdr-dock.overview` action opens a kanban board with Working, Closed, Done, and optional Archived columns. Press Enter to focus or reopen a dock, `E` to add repositories, `D` to mark it done and close its workspace, `A` to archive and remove clean worktrees, or `H` to show and hide archived docks. The detail pane shows the goal, branch, root, Herdr session, agents, and repositories.
 
@@ -65,7 +65,7 @@ Running one agent per service gets messy fast: each repo solves its half of a fe
 - **One shared branch** across every repository, so the work stays in lockstep.
 - **Sibling worktrees** — lambs on their own lead, so your main checkouts stay clean and yours to use.
 - **Shared context** — `AGENTS.md` and `CLAUDE.md` state the project goal and repository map for every agent.
-- **One workspace, many tabs and panes** — the `root` tab coordinates work, and each repository tab can host multiple worker panes for parallel tasks.
+- **Root and child sessions** — the persistent root can work directly or use Herdr to start and communicate with child agents in any repository, without a required delegation structure.
 - **Resumable sessions** — close the dock and Herdr keeps the session IDs, so reopening gets back to work, not to square one.
 
 ---
