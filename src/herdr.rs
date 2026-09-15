@@ -229,6 +229,20 @@ pub(crate) fn open_workspace(name: &str, dock_tabs: &[DockTab]) -> Result<Opened
         }
     }
 }
+pub(crate) fn add_workspace_tab(workspace_id: &str, tab: &DockTab) -> Result<String> {
+    let response = herdr_json(&[
+        "tab",
+        "create",
+        "--workspace",
+        workspace_id,
+        "--cwd",
+        &tab.cwd.to_string_lossy(),
+        "--label",
+        &tab.label,
+        "--no-focus",
+    ])?;
+    json_string(&response, "/result/tab/tab_id")
+}
 pub(crate) fn resume_agents(record: &DockRecord, workspace: &OpenedWorkspace) -> Vec<String> {
     let mut errors = Vec::new();
     let mut occupied_tabs = BTreeSet::new();

@@ -74,6 +74,8 @@ pub(crate) struct DockRecord {
     pub(crate) name: String,
     pub(crate) slug: String,
     pub(crate) branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) goal: Option<String>,
     pub(crate) root: PathBuf,
     pub(crate) workspace_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -165,6 +167,7 @@ pub(crate) struct DockOverview {
     pub(crate) record_index: usize,
     pub(crate) name: String,
     pub(crate) branch: String,
+    pub(crate) goal: Option<String>,
     pub(crate) root: PathBuf,
     pub(crate) workspace_id: String,
     pub(crate) herdr_session: Option<String>,

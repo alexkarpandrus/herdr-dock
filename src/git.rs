@@ -14,6 +14,15 @@ pub(crate) fn check_branch_name(branch: &str) -> Result<()> {
     )?;
     Ok(())
 }
+pub(crate) fn local_branch_exists(repository: &Path, branch: &str) -> Result<bool> {
+    Ok(Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["show-ref", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .status()?
+        .success())
+}
 pub(crate) fn git_refs(repository: &Path) -> Result<Vec<String>> {
     let output = git(
         repository,

@@ -24,7 +24,7 @@ pub(crate) fn prompt_name(ui: &mut Ui, prefix: &str) -> Result<Option<String>> {
     loop {
         let slug = slugify(&line.text);
         ui.frame(
-            "Create dock · project name",
+            "Create dock · 1/6 project name",
             &[
                 format!("> {}", line.display()),
                 String::new(),
@@ -43,13 +43,62 @@ pub(crate) fn prompt_name(ui: &mut Ui, prefix: &str) -> Result<Option<String>> {
         }
     }
 }
+pub(crate) fn prompt_goal(ui: &mut Ui) -> Result<Option<String>> {
+    let mut line = Line::new();
+    loop {
+        ui.frame(
+            "Create dock · 2/6 goal",
+            &[
+                "What should the agents deliver?".into(),
+                String::new(),
+                format!("> {}", line.display()),
+                String::new(),
+                "Enter continue (empty is allowed) · Esc cancel".into(),
+            ],
+        )?;
+        match line.handle(&read_key()?) {
+            LineAction::Submit => return Ok(Some(line.text.trim().into())),
+            LineAction::Cancel => return Ok(None),
+            _ => {}
+        }
+    }
+}
+
+pub(crate) fn prompt_branch(ui: &mut Ui, initial: &str) -> Result<Option<String>> {
+    let mut line = Line::with_text(initial);
+    loop {
+        ui.frame(
+            "Create dock · 3/6 branch",
+            &[
+                "Use a new branch or enter an existing local branch to resume work.".into(),
+                String::new(),
+                format!("> {}", line.display()),
+                String::new(),
+                "Enter continue · Esc cancel · arrows move · Ctrl+U clear".into(),
+            ],
+        )?;
+        match line.handle(&read_key()?) {
+            LineAction::Submit if !line.text.trim().is_empty() => {
+                return Ok(Some(line.text.trim().into()));
+            }
+            LineAction::Cancel => return Ok(None),
+            _ => {}
+        }
+    }
+}
 pub(crate) fn prompt_repositories(
     ui: &mut Ui,
+    title: &str,
     repositories: &[Repository],
     presets: &[Preset],
     search_roots: &[PathBuf],
+    excluded: &[PathBuf],
 ) -> Result<Option<RepositorySelection>> {
-    let mut repositories = repositories.to_vec();
+    let mut repositories = repositories
+        .iter()
+        .filter(|repository| !excluded.contains(&repository.path))
+        .cloned()
+        .collect::<Vec<_>>();
     let mut selected = vec![false; repositories.len()];
     let mut query = Line::new();
     let mut cursor = 0;
@@ -96,9 +145,10 @@ pub(crate) fn prompt_repositories(
             ranked_repositories(&query.text, discovered.as_deref().unwrap_or_default())
                 .into_iter()
                 .filter(|repository| {
-                    !repositories
-                        .iter()
-                        .any(|existing| existing.path == repository.path)
+                    !excluded.contains(&repository.path)
+                        && !repositories
+                            .iter()
+                            .any(|existing| existing.path == repository.path)
                 })
                 .collect::<Vec<_>>()
         };
@@ -157,10 +207,12 @@ pub(crate) fn prompt_repositories(
         lines.push(
             "Type to search · ↑/↓ move · Space select · Enter continue · Esc clear/cancel".into(),
         );
-        if !presets.is_empty() {
-            lines.push("Shift+P load preset · Shift+S save preset".into());
+        if presets.is_empty() {
+            lines.push("Shift+S save selected as preset".into());
+        } else {
+            lines.push("Shift+P load preset · Shift+S save selected as preset".into());
         }
-        ui.frame("Create dock · repositories", &lines)?;
+        ui.frame(title, &lines)?;
 
         let key = if scanning {
             if event::poll(Duration::from_millis(50))? {
@@ -219,7 +271,7 @@ pub(crate) fn prompt_repositories(
                 }
             }
             KeyCode::Char('S') if query.text.is_empty() && selected.iter().any(|value| *value) => {
-                preset_name = prompt_text(ui, "Create dock · preset name")?;
+                preset_name = prompt_text(ui, "Repository preset name")?;
             }
             KeyCode::Enter if selected.iter().any(|value| *value) => {
                 let chosen = repositories
@@ -456,6 +508,7 @@ pub(crate) fn upsert_preset(presets: &mut Vec<Preset>, preset: Preset) {
 }
 pub(crate) fn prompt_base_ref(
     ui: &mut Ui,
+    title: &str,
     repository: &str,
     refs: &[String],
     initial: &str,
@@ -494,7 +547,7 @@ pub(crate) fn prompt_base_ref(
             String::new(),
             "Type to search · ↑/↓ move · Enter select · Tab use for all · Esc clear/cancel".into(),
         ]);
-        ui.frame(&format!("Create dock · base ref for {repository}"), &lines)?;
+        ui.frame(&format!("{title} · base ref for {repository}"), &lines)?;
         let key = read_key()?;
         match key.code {
             KeyCode::Esc if !query.text.is_empty() => {

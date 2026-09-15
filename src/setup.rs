@@ -34,6 +34,15 @@ fn config_path() -> Result<PathBuf> {
         .ok_or_else(|| message("HOME is not set; cannot locate the Herdr config"))?;
     Ok(base.join("herdr").join("config.toml"))
 }
+pub(crate) fn hotkeys_configured() -> Result<bool> {
+    let path = config_path()?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let config = fs::read_to_string(path)?;
+    Ok(config.contains("command = \"herdr-dock.create\"")
+        && config.contains("command = \"herdr-dock.overview\""))
+}
 
 pub(crate) fn setup() -> Result<()> {
     let path = config_path()?;
@@ -66,11 +75,14 @@ pub(crate) fn setup() -> Result<()> {
             fs::write(&backup, &original)?;
             lines.push(format!("backed up config to {}", backup.display()));
         }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::write(&path, config)?;
         lines.push(format!("wrote keybindings to {}", path.display()));
     }
     lines.push("Reload with: herdr server reload-config".to_string());
-    lines.push("Then press prefix+d to create a dock and prefix+o for the overview.".to_string());
+    lines.push("Hotkeys: prefix+d creates a dock; prefix+o opens the overview.".to_string());
 
     if io::stdin().is_terminal() {
         let mut ui = crate::ui::Ui::start()?;

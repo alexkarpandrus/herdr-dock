@@ -244,6 +244,7 @@ mod tests {
         )?;
         assert_eq!(old_record.worktree_manager, WorktreeManager::Git);
         assert!(old_record.herdr_session.is_none());
+        assert!(old_record.goal.is_none());
         assert!(old_record.completed_at_unix.is_none());
         assert!(old_record.agents.is_empty());
         assert!(old_record.tabs.is_empty());
@@ -294,6 +295,7 @@ mod tests {
             name: "Test dock".into(),
             slug: "test_dock".into(),
             branch: "agent/test_dock".into(),
+            goal: None,
             root: temporary.clone(),
             workspace_id: "w1".into(),
             herdr_session: Some("default".into()),
@@ -458,6 +460,7 @@ mod tests {
             WorktreeManager::Git,
             &root,
             "OAuth login",
+            Some("Ship OAuth login across API and web"),
             "agent/oauth_login",
             &plans,
         )?;
@@ -470,6 +473,7 @@ mod tests {
             );
         }
         let guide = fs::read_to_string(root.join("AGENTS.md"))?;
+        assert!(guide.contains("## Goal\n\nShip OAuth login across API and web"));
         assert!(guide.contains("api"));
         assert!(guide.contains("herdr agent prompt"));
         assert!(guide.contains("multiple worker panes"));
@@ -483,6 +487,7 @@ mod tests {
             name: "OAuth login".into(),
             slug: "oauth_login".into(),
             branch: "agent/oauth_login".into(),
+            goal: Some("Ship OAuth login across API and web".into()),
             root: root.clone(),
             workspace_id: "workspace-1".into(),
             herdr_session: Some("default".into()),
@@ -533,11 +538,10 @@ mod tests {
 
         let error =
             archive_dock(&record, false, || Ok(())).expect_err("dirty worktree must be refused");
-        assert!(
-            error
-                .to_string()
-                .contains("uncommitted or untracked changes")
-        );
+        let error = error.to_string();
+        assert!(error.contains("uncommitted or untracked changes"));
+        assert!(error.contains(&worktrees[0].display().to_string()));
+        assert!(error.contains("status --short --untracked-files=all"));
         assert!(root.exists());
 
         fs::remove_file(worktrees[0].join("dirty.txt"))?;
@@ -636,12 +640,41 @@ mod tests {
                 ["rev-parse", "--verify", "refs/heads/agent/oauth_login"],
             )?;
         }
+        let add_root = temporary.join("workspaces").join("add-repository");
+        fs::create_dir(&add_root)?;
+        let existing_plan = RepositoryPlan {
+            repository: plans[0].repository.clone(),
+            base_ref: "agent/oauth_login".into(),
+        };
+        let added = materialize_added_worktrees(
+            WorktreeManager::Git,
+            &add_root,
+            "agent/oauth_login",
+            std::slice::from_ref(&existing_plan),
+        )?;
+        assert_eq!(
+            git(&added[0].1, ["branch", "--show-current"])?,
+            "agent/oauth_login"
+        );
+        write_agent_guides(
+            &add_root,
+            "OAuth login",
+            Some("Ship OAuth login"),
+            "agent/oauth_login",
+            &[existing_plan],
+        )?;
+        assert!(fs::read_to_string(add_root.join("AGENTS.md"))?.contains("reused existing branch"));
+        assert!(cleanup_added_resources(WorktreeManager::Git, &added, &[]).is_empty());
+        fs::remove_file(add_root.join("AGENTS.md"))?;
+        fs::remove_file(add_root.join("CLAUDE.md"))?;
+        fs::remove_dir(&add_root)?;
 
         let rollback_root = temporary.join("workspaces").join("rollback");
         let rollback_worktrees = materialize_worktrees(
             WorktreeManager::Git,
             &rollback_root,
             "Rollback",
+            None,
             "agent/oauth_login",
             &plans,
         )?;
