@@ -577,21 +577,18 @@ pub(crate) fn show_overview() -> Result<()> {
                 }
                 let archived_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
                 drop(ui);
-                let mut archive_result = (|| -> Result<()> {
+                state.docks[index].archived_at_unix = Some(archived_at);
+                let archive_result = (|| -> Result<()> {
                     ensure_no_live_legacy_workspace(&state.docks[index])?;
                     if open {
                         check_dock_session(&state.docks[index], current_session.as_deref())?;
-                        archive_dock(&state.docks[index], true)
-                    } else {
-                        archive_dock(&state.docks[index], false)
                     }
+                    archive_dock(&state.docks[index], open, || {
+                        save_state(&state_path, &state)
+                    })
                 })();
-                if archive_result.is_ok() {
-                    state.docks[index].archived_at_unix = Some(archived_at);
-                    if let Err(error) = save_state(&state_path, &state) {
-                        state.docks[index].archived_at_unix = None;
-                        archive_result = Err(error);
-                    }
+                if archive_result.is_err() {
+                    state.docks[index].archived_at_unix = None;
                 }
                 ui = Ui::start()?;
                 match archive_result {

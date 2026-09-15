@@ -531,7 +531,8 @@ mod tests {
             1
         );
 
-        let error = archive_dock(&record, false).expect_err("dirty worktree must be refused");
+        let error =
+            archive_dock(&record, false, || Ok(())).expect_err("dirty worktree must be refused");
         assert!(
             error
                 .to_string()
@@ -544,7 +545,7 @@ mod tests {
         let guide = fs::read(&agents_guide)?;
         fs::remove_file(&agents_guide)?;
         fs::create_dir(&agents_guide)?;
-        archive_dock(&record, false).expect_err("root cleanup failure must be reported");
+        archive_dock(&record, false, || Ok(())).expect_err("root cleanup failure must be reported");
         assert!(worktrees.iter().all(|worktree| worktree.is_dir()));
         fs::remove_dir(&agents_guide)?;
         fs::write(&agents_guide, guide)?;
@@ -566,7 +567,8 @@ mod tests {
             "ignore local files",
         ]))?;
         fs::write(worktrees[0].join(".ignored"), "must survive")?;
-        let error = archive_dock(&record, false).expect_err("ignored files must be refused");
+        let error =
+            archive_dock(&record, false, || Ok(())).expect_err("ignored files must be refused");
         assert!(error.to_string().contains("ignored files"));
         fs::remove_file(worktrees[0].join(".ignored"))?;
 
@@ -576,8 +578,8 @@ mod tests {
             "status.showUntrackedFiles",
             "no",
         ]))?;
-        let error =
-            archive_dock(&record, false).expect_err("hidden untracked files must be refused");
+        let error = archive_dock(&record, false, || Ok(()))
+            .expect_err("hidden untracked files must be refused");
         assert!(
             error
                 .to_string()
@@ -594,11 +596,13 @@ mod tests {
                 .arg(&relocated),
         )?;
         std::os::unix::fs::symlink(&relocated, &record.repositories[1].worktree)?;
-        let error = archive_dock(&record, false).expect_err("symlinked worktree must be refused");
+        let error = archive_dock(&record, false, || Ok(()))
+            .expect_err("symlinked worktree must be refused");
         assert!(error.to_string().contains("symbolic link"));
         assert!(relocated.is_dir());
         fs::remove_file(&record.repositories[1].worktree)?;
-        let error = archive_dock(&record, false).expect_err("relocated worktree must be refused");
+        let error = archive_dock(&record, false, || Ok(()))
+            .expect_err("relocated worktree must be refused");
         assert!(error.to_string().contains("is checked out at"));
         checked(
             Command::new("git")
@@ -608,14 +612,24 @@ mod tests {
                 .arg(&relocated)
                 .arg(&record.repositories[1].worktree),
         )?;
+
+        let error = archive_dock(&record, false, || {
+            assert!(!root.exists());
+            Err(message("state save failed"))
+        })
+        .expect_err("failed state save must restore archived files");
+        assert!(error.to_string().contains("state save failed"));
+        assert!(worktrees.iter().all(|worktree| worktree.is_dir()));
+        assert!(root.join("AGENTS.md").is_file());
+        assert!(root.join("CLAUDE.md").is_file());
         record.worktree_manager.remove(
             &record.repositories[0].source,
             &record.repositories[0].worktree,
         )?;
         assert!(!worktrees[0].exists());
-        archive_dock(&record, false)?;
+        archive_dock(&record, false, || Ok(()))?;
         assert!(!root.exists());
-        archive_dock(&record, false)?;
+        archive_dock(&record, false, || Ok(()))?;
         for plan in &plans {
             git(
                 &plan.repository.path,

@@ -142,7 +142,11 @@ pub(crate) fn preflight_archive(record: &DockRecord) -> Result<bool> {
     }
     Ok(has_worktrees)
 }
-pub(crate) fn archive_dock(record: &DockRecord, close_workspace: bool) -> Result<()> {
+pub(crate) fn archive_dock(
+    record: &DockRecord,
+    close_workspace: bool,
+    commit: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     if preflight_archive(record)? {
         record.worktree_manager.ensure_available()?;
     }
@@ -161,21 +165,6 @@ pub(crate) fn archive_dock(record: &DockRecord, close_workspace: bool) -> Result
         }
     }
 
-    let restore = |removed: &[&DockRepository]| {
-        let mut errors = Vec::new();
-        for repository in removed.iter().rev() {
-            if let Err(error) = record.worktree_manager.create(
-                &repository.source,
-                &repository.worktree,
-                &record.branch,
-                &repository.base_ref,
-                true,
-            ) {
-                errors.push(error.to_string());
-            }
-        }
-        errors
-    };
     let mut removed: Vec<&DockRepository> = Vec::new();
     for repository in &record.repositories {
         if repository.worktree.is_dir() {
@@ -183,7 +172,10 @@ pub(crate) fn archive_dock(record: &DockRecord, close_workspace: bool) -> Result
                 .worktree_manager
                 .remove(&repository.source, &repository.worktree)
             {
-                return Err(with_cleanup_errors(error, restore(&removed)));
+                return Err(with_cleanup_errors(
+                    error,
+                    restore_archive(record, &removed, &guides),
+                ));
             }
             removed.push(repository);
         }
@@ -202,17 +194,51 @@ pub(crate) fn archive_dock(record: &DockRecord, close_workspace: bool) -> Result
         Ok(())
     })();
     if let Err(error) = cleanup {
-        let mut restore_errors = restore(&removed);
-        for (path, contents) in guides {
-            if !path.exists()
-                && let Err(restore_error) = fs::write(&path, contents)
-            {
-                restore_errors.push(restore_error.to_string());
-            }
-        }
-        return Err(with_cleanup_errors(error, restore_errors));
+        return Err(with_cleanup_errors(
+            error,
+            restore_archive(record, &removed, &guides),
+        ));
+    }
+    if let Err(error) = commit() {
+        return Err(with_cleanup_errors(
+            error,
+            restore_archive(record, &removed, &guides),
+        ));
     }
     Ok(())
+}
+
+fn restore_archive(
+    record: &DockRecord,
+    removed: &[&DockRepository],
+    guides: &[(PathBuf, Vec<u8>)],
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if (!removed.is_empty() || !guides.is_empty())
+        && let Err(error) = fs::create_dir_all(&record.root)
+    {
+        errors.push(error.to_string());
+        return errors;
+    }
+    for repository in removed.iter().rev() {
+        if let Err(error) = record.worktree_manager.create(
+            &repository.source,
+            &repository.worktree,
+            &record.branch,
+            &repository.base_ref,
+            true,
+        ) {
+            errors.push(error.to_string());
+        }
+    }
+    for (path, contents) in guides {
+        if !path.exists()
+            && let Err(error) = fs::write(path, contents)
+        {
+            errors.push(error.to_string());
+        }
+    }
+    errors
 }
 pub(crate) fn registered_worktree(
     source: &Path,
