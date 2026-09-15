@@ -114,8 +114,10 @@ pub(crate) fn preflight_archive(record: &DockRecord) -> Result<bool> {
         .is_empty()
         {
             return Err(message(format!(
-                "{} has uncommitted or untracked changes",
-                repository.name
+                "{} has uncommitted or untracked changes at {}\nRun `git -C {:?} status --short --untracked-files=all`.",
+                repository.name,
+                repository.worktree.display(),
+                repository.worktree
             )));
         }
         if !git(
@@ -124,7 +126,12 @@ pub(crate) fn preflight_archive(record: &DockRecord) -> Result<bool> {
         )?
         .is_empty()
         {
-            return Err(message(format!("{} has ignored files", repository.name)));
+            return Err(message(format!(
+                "{} has ignored files at {}\nRun `git -C {:?} status --short --ignored`.",
+                repository.name,
+                repository.worktree.display(),
+                repository.worktree
+            )));
         }
         has_worktrees = true;
     }

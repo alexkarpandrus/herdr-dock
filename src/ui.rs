@@ -296,14 +296,31 @@ pub(crate) fn confirm_archive(ui: &mut Ui, dock: &DockOverview) -> Result<bool> 
 }
 pub(crate) fn confirm_complete(ui: &mut Ui, dock: &DockOverview) -> Result<bool> {
     ui.frame(
-        "Close dock",
+        "Mark dock done and close",
         &[
             format!("Dock: {}", dock.name),
             String::new(),
-            "This closes its workspace, tabs, and running processes.".into(),
+            "This marks the dock done and closes its workspace, tabs, and processes.".into(),
             "Worktrees and resumable agent session IDs remain.".into(),
             String::new(),
-            "Y close/done · any other key cancel".into(),
+            "Y mark done and close · any other key cancel".into(),
+        ],
+    )?;
+    Ok(matches!(
+        read_key()?.code,
+        KeyCode::Char('y') | KeyCode::Char('Y')
+    ))
+}
+pub(crate) fn confirm_hotkeys(ui: &mut Ui) -> Result<bool> {
+    ui.frame(
+        "Create dock · first-run setup",
+        &[
+            "Install the recommended Herdr shortcuts?".into(),
+            String::new(),
+            "prefix+d creates a dock; prefix+o opens the overview.".into(),
+            "The setup backs up an existing Herdr config before changing it.".into(),
+            String::new(),
+            "Y install hotkeys · any other key skip".into(),
         ],
     )?;
     Ok(matches!(
@@ -314,22 +331,56 @@ pub(crate) fn confirm_complete(ui: &mut Ui, dock: &DockOverview) -> Result<bool>
 pub(crate) fn confirm_create(
     ui: &mut Ui,
     name: &str,
+    goal: Option<&str>,
     branch: &str,
     root: &Path,
     plans: &[RepositoryPlan],
 ) -> Result<bool> {
-    let mut lines = vec![
-        format!("Name:   {name}"),
+    let mut lines = vec![format!("Name:   {name}")];
+    if let Some(goal) = goal {
+        lines.push(format!("Goal:   {goal}"));
+    }
+    lines.extend([
         format!("Branch: {branch}"),
         format!("Root:   {}", root.display()),
         String::new(),
         "Repositories:".into(),
-    ];
+    ]);
     for plan in plans {
-        lines.push(format!("  {}  <-  {}", plan.repository.name, plan.base_ref));
+        lines.push(if plan.base_ref == branch {
+            format!("  {}  reuse existing {branch}", plan.repository.name)
+        } else {
+            format!("  {}  create from {}", plan.repository.name, plan.base_ref)
+        });
     }
     lines.extend([String::new(), "Y create · any other key cancel".into()]);
-    ui.frame("Create dock", &lines)?;
+    ui.frame("Create dock · 6/6 review", &lines)?;
+    Ok(matches!(
+        read_key()?.code,
+        KeyCode::Char('y') | KeyCode::Char('Y')
+    ))
+}
+pub(crate) fn confirm_add_repositories(
+    ui: &mut Ui,
+    name: &str,
+    branch: &str,
+    plans: &[RepositoryPlan],
+) -> Result<bool> {
+    let mut lines = vec![
+        format!("Dock:   {name}"),
+        format!("Branch: {branch}"),
+        String::new(),
+        "Add repositories:".into(),
+    ];
+    for plan in plans {
+        lines.push(if plan.base_ref == branch {
+            format!("  {}  reuse existing {branch}", plan.repository.name)
+        } else {
+            format!("  {}  create from {}", plan.repository.name, plan.base_ref)
+        });
+    }
+    lines.extend([String::new(), "Y add · any other key cancel".into()]);
+    ui.frame("Add repositories · review", &lines)?;
     Ok(matches!(
         read_key()?.code,
         KeyCode::Char('y') | KeyCode::Char('Y')

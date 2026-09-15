@@ -1,5 +1,6 @@
 use crate::Result;
 use crate::archive::archive_dock;
+use crate::create::add_repositories_to_dock;
 use crate::dock::{
     check_dock_session, ensure_no_live_legacy_workspace, legacy_workspace_is_live, reopen_dock,
     sync_dock_agents,
@@ -42,12 +43,12 @@ fn status_segment(status: &str) -> Segment {
 
 fn overview_hint(dock: &DockOverview) -> String {
     if dock.archived {
-        "↑↓ move · ←→ column · / filter · R refresh · ? help · Esc close".into()
+        "↑↓ move · ←→ column · H archived · / filter · R refresh · ? help · Esc close".into()
     } else if dock.done {
-        "↑↓ move · ←→ column · Enter reopen · A archive · / filter · R refresh · ? help · Esc close"
+        "↑↓ move · ←→ column · Enter reopen · A archive · H archived · / filter · ? help · Esc close"
             .into()
     } else {
-        "↑↓ move · ←→ column · Enter focus/reopen · D close · A archive · / filter · R refresh · ? help · Esc close"
+        "↑↓ move · ←→ column · Enter focus/reopen · E add repo · D done · A archive · H archived · ? help"
             .into()
     }
 }
@@ -56,11 +57,12 @@ fn show_help(ui: &mut Ui) -> Result<()> {
     let lines = vec![
         vec![plain("Keys")],
         vec![plain(
-            "  ↑↓ move ←→ column    Enter focus/reopen    D close    A archive",
+            "  ↑↓ move ←→ column    Enter focus/reopen    E add repository",
         )],
         vec![plain(
-            "  / filter      R refresh             Esc close  ? help",
+            "  D mark done and close    A archive    H show/hide archived",
         )],
+        vec![plain("  / filter    R refresh    Esc close    ? help")],
         vec![plain(String::new())],
         vec![plain("Status colors")],
         vec![
@@ -266,6 +268,9 @@ fn board_lines(
     let mut lane_blocks: Vec<Vec<Vec<Segment>>> = Vec::new();
     let mut max_rows = 0usize;
     for (col, group) in groups.iter().enumerate() {
+        if group.is_empty() {
+            continue;
+        }
         let lane = lanes[col];
         let mut block: Vec<Vec<Segment>> = Vec::new();
         let count = group.len();
@@ -376,6 +381,9 @@ fn card_lines(dock: &DockOverview, width: usize, selected: bool) -> Vec<Vec<Segm
 /// Detail pane for the selected dock, shown below the kanban board.
 fn detail_lines(dock: &DockOverview) -> Vec<Vec<Segment>> {
     let mut lines: Vec<Vec<Segment>> = Vec::new();
+    if let Some(goal) = &dock.goal {
+        lines.push(vec![plain(format!("Goal: {goal}"))]);
+    }
     lines.push(vec![plain(format!("Branch: {}", dock.branch))]);
     lines.push(vec![plain(format!("Root: {}", dock.root.display()))]);
     lines.push(vec![plain(format!(
@@ -452,21 +460,35 @@ pub(crate) fn show_overview() -> Result<()> {
     let mut cursor: usize = 0;
     let mut filter = String::new();
     let mut filtering = false;
+    let mut show_archived = false;
     let mut ui = Ui::start()?;
     loop {
         let matches = docks
             .iter()
             .enumerate()
             .filter(|(_, dock)| {
-                filter.is_empty()
-                    || dock.name.to_lowercase().contains(&filter.to_lowercase())
-                    || dock.branch.to_lowercase().contains(&filter.to_lowercase())
-                    || dock.status.to_lowercase().contains(&filter.to_lowercase())
+                (!dock.archived || show_archived)
+                    && (filter.is_empty()
+                        || dock.name.to_lowercase().contains(&filter.to_lowercase())
+                        || dock.goal.as_deref().is_some_and(|goal| {
+                            goal.to_lowercase().contains(&filter.to_lowercase())
+                        })
+                        || dock.branch.to_lowercase().contains(&filter.to_lowercase())
+                        || dock.status.to_lowercase().contains(&filter.to_lowercase()))
             })
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
         cursor = cursor.min(matches.len().saturating_sub(1));
         let mut lines = board_lines(&docks, &matches, cursor, &filter);
+        if matches.is_empty()
+            && filter.is_empty()
+            && !show_archived
+            && docks.iter().any(|dock| dock.archived)
+        {
+            lines = vec![vec![plain(
+                "No active docks. Press H to show archived docks.",
+            )]];
+        }
 
         // Detail pane for the selected dock (hidden while typing a filter).
         if !matches.is_empty() && !filtering {
@@ -488,7 +510,7 @@ pub(crate) fn show_overview() -> Result<()> {
             lines.push(vec![styled(Color::Cyan, format!("Filter: {filter}"))]);
         }
         lines.push(vec![plain(if matches.is_empty() {
-            "Esc back · type to filter".into()
+            "H show/hide archived · / filter · Esc close".into()
         } else if filtering {
             "Type to filter · Enter done · Esc clear".into()
         } else {
@@ -511,6 +533,10 @@ pub(crate) fn show_overview() -> Result<()> {
             KeyCode::Char('/') if !filtering => filtering = true,
 
             KeyCode::Char('?') if !filtering => show_help(&mut ui)?,
+            KeyCode::Char('h') | KeyCode::Char('H') if !filtering => {
+                show_archived = !show_archived;
+                cursor = 0;
+            }
             KeyCode::Enter if filtering => filtering = false,
             KeyCode::Backspace if filtering => {
                 filter.pop();
@@ -528,6 +554,42 @@ pub(crate) fn show_overview() -> Result<()> {
             KeyCode::Right if !filtering => cursor = move_cursor(&docks, &matches, cursor, "right"),
             KeyCode::Char('r') | KeyCode::Char('R') if !filtering => {
                 docks = collect_overview(&mut state, &state_path, current_session.as_deref())?;
+            }
+            KeyCode::Char('e') | KeyCode::Char('E') if !filtering && !matches.is_empty() => {
+                let dock = &docks[matches[cursor]];
+                if dock.archived || dock.done {
+                    continue;
+                }
+                let index = dock.record_index;
+                let open = dock.open;
+                let session_check =
+                    check_dock_session(&state.docks[index], current_session.as_deref());
+                drop(ui);
+                let result = session_check
+                    .and_then(|()| add_repositories_to_dock(&mut state, index, &state_path, open));
+                ui = Ui::start()?;
+                match result {
+                    Ok(Some(count)) => {
+                        show_notice(
+                            &mut ui,
+                            "Repositories added",
+                            &format!(
+                                "Added {count} {}.",
+                                if count == 1 {
+                                    "repository"
+                                } else {
+                                    "repositories"
+                                }
+                            ),
+                        )?;
+                        docks =
+                            collect_overview(&mut state, &state_path, current_session.as_deref())?;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        show_notice(&mut ui, "Repositories not added", &error.to_string())?;
+                    }
+                }
             }
             KeyCode::Char('d') | KeyCode::Char('D') if !filtering && !matches.is_empty() => {
                 let dock = &docks[matches[cursor]];
@@ -562,7 +624,7 @@ pub(crate) fn show_overview() -> Result<()> {
                         docks =
                             collect_overview(&mut state, &state_path, current_session.as_deref())?
                     }
-                    Err(error) => show_notice(&mut ui, "Dock not closed", &error.to_string())?,
+                    Err(error) => show_notice(&mut ui, "Dock not marked done", &error.to_string())?,
                 }
             }
             KeyCode::Char('a') | KeyCode::Char('A') if !filtering && !matches.is_empty() => {
@@ -731,6 +793,7 @@ pub(crate) fn build_overview(
                 record_index,
                 name: record.name.clone(),
                 branch: record.branch.clone(),
+                goal: record.goal.clone(),
                 root: record.root.clone(),
                 workspace_id: record.workspace_id.clone(),
                 herdr_session: record.herdr_session.clone(),

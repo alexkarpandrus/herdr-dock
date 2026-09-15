@@ -4,9 +4,9 @@
 
 # herdr-dock
 
-**Herds your repositories into one pen — for Herdr.**
+**Create and resume one AI-agent workspace for a change that spans multiple repositories.**
 
-`herdr-dock` rounds up a set of related repositories and folds them into a single, resumable agent workspace: it creates sibling Git worktrees on a shared branch, writes shared `AGENTS.md`/`CLAUDE.md` guides, opens a coordinator root tab plus one repository tab per worktree, and remembers everything so you can pick the whole flock back up where you left off.
+`herdr-dock` creates sibling Git worktrees on one shared branch, gives every agent the same project goal and repository map, opens a coordinator tab plus one tab per repository, and remembers the workspace for later.
 
 </div>
 
@@ -25,18 +25,18 @@
 
 ## Demo
 
-Name a project, pick repositories, choose a base ref, review, and create. The dock lands as sibling worktrees with a shared agent guide, and the overview keeps its color-coded project statuses, dirty counts, and live commit subjects — open it, focus a dock, or resume right where you left off.
+Name the project, state the goal, choose or reuse a branch, pick repositories, review, and create. The overview shows live status, dirty repositories, and commit subjects; it can also add repositories as the scope changes.
 
 <p align="center">
   <img src="docs/herdr-dock-demo.gif" alt="herdr-dock create flow, workspace, and overview demo" width="900" />
 </p>
 
-1. **Name the project** — the `<prefix>/<slug>` branch is previewed as you type.
-2. **Pick repositories** — a saved quick list stays on top; type to search configured roots.
-3. **Choose a base ref** — branches and remote refs filter as you type; `Tab` applies one ref to every repository.
-4. **Review and create** — confirm the branch, root, and per-repository plans.
-5. **Workspace** — the dock lands as sibling worktrees with a shared `AGENTS.md`/`CLAUDE.md`, so any agent that arrives knows the whole change.
-6. **Overview** — every dock's live status, dirty count, and latest commit subject in one view.
+1. **Name the project and goal** — the goal is written into the shared agent guides.
+2. **Choose the branch** — keep the generated name or enter an existing local branch to resume work.
+3. **Pick repositories** — a saved quick list stays on top; type to search configured roots.
+4. **Choose base refs** — only repositories without the branch need a base; `Tab` applies one ref to every compatible repository.
+5. **Review and create** — existing branches are marked as reused before any worktree is created.
+6. **Workspace and overview** — coordinate from the root tab, add repositories with `E`, and resume the dock later.
 
 ---
 
@@ -44,15 +44,15 @@ Name a project, pick repositories, choose a base ref, review, and create. The do
 
 The `herdr-dock.create` action opens a terminal popup that:
 
-1. accepts a project name and previews its `<prefix>/<snake_case_slug>` branch;
-2. selects one or more configured repositories;
-3. loads or saves named repository presets with `P` and `S`;
-4. selects and remembers a base ref for each repository (`Tab` uses one ref for all);
-5. reviews the branch, root, and repositories, then creates them as sibling Git worktrees;
-6. writes `AGENTS.md` and `CLAUDE.md` in their shared root; and
+1. accepts a project name and an optional goal;
+2. accepts the generated branch name or any existing local branch;
+3. selects one or more repositories and loads or saves presets with `P` and `S`;
+4. selects and remembers base refs only where the target branch does not exist;
+5. reviews which repositories will create or reuse the branch;
+6. writes the goal and repository map to shared `AGENTS.md` and `CLAUDE.md` files; and
 7. opens a coordinator `root` tab plus one worker tab per repository.
 
-The `herdr-dock.overview` action opens a kanban board: one column per status (Working, Closed, Done, Archived), with each dock as a card showing its name, status, tab/repo/dirty/agent counts, and branch. Move with the arrow keys (↑/↓ within a column, ←/→ across columns), press Enter to focus an open dock or reopen a closed dock and resume its saved agent sessions, press `D` to close a dock and mark it done, and press `A` to archive and remove clean worktrees. The pane under the board shows the selected dock's branch, root, Herdr session, agents, and repository details.
+The `herdr-dock.overview` action opens a kanban board with Working, Closed, Done, and optional Archived columns. Press Enter to focus or reopen a dock, `E` to add repositories, `D` to mark it done and close its workspace, `A` to archive and remove clean worktrees, or `H` to show and hide archived docks. The detail pane shows the goal, branch, root, Herdr session, agents, and repositories.
 
 The `herdr-dock.setup` action writes the recommended keybindings into your Herdr configuration.
 
@@ -64,7 +64,7 @@ Running one agent per service gets messy fast: each repo solves its half of a fe
 
 - **One shared branch** across every repository, so the work stays in lockstep.
 - **Sibling worktrees** — lambs on their own lead, so your main checkouts stay clean and yours to use.
-- **A shared root** with `AGENTS.md`/`CLAUDE.md` describing the workspace to any agent that arrives.
+- **Shared context** — `AGENTS.md` and `CLAUDE.md` state the project goal and repository map for every agent.
 - **One workspace, many tabs and panes** — the `root` tab coordinates work, and each repository tab can host multiple worker panes for parallel tasks.
 - **Resumable sessions** — close the dock and Herdr keeps the session IDs, so reopening gets back to work, not to square one.
 
@@ -76,12 +76,13 @@ Herdr Dock uses one JSON file at `$HERDR_PLUGIN_STATE_DIR/state.json`. It does n
 
 A per-state-file lock permits only one Herdr Dock management action at a time. If another create or overview action is already open for the same state directory, the second action exits with a retry message. Running docks and agent sessions are not locked. Temporary state files include the writer process ID, so concurrent or interrupted writers do not share a temporary path.
 
-Each dock record stores its Herdr session name, current workspace ID, tab labels and working directories, repositories, completion time, and the last observed recognized agents. Each agent record stores its tab, name, kind, working directory, and Herdr-provided resumable session ID or path:
+Each dock record stores its goal, Herdr session, workspace ID, tabs, repositories, lifecycle timestamps, and the last observed agents. Each agent record stores its tab, name, kind, working directory, and resumable session ID or path:
 
 ```json
 {
   "herdr_session": "default",
   "workspace_id": "w1",
+  "goal": "Ship OAuth login across API and web",
   "completed_at_unix": 1740000000,
   "tabs": [{"label": "api", "cwd": "/work/dock/api"}],
   "agents": [{
@@ -99,11 +100,11 @@ Each dock record stores its Herdr session name, current workspace ID, tab labels
 }
 ```
 
-The overview refreshes this metadata from Herdr. Enter focuses a live workspace. If the workspace was closed, Enter recreates the dock tabs and resumes supported agent sessions in their saved working directories. If Herdr did not report a resumable session, the overview keeps the agent record and reports that it cannot resume that agent.
+The overview refreshes this metadata from Herdr. Enter focuses a live workspace or recreates a closed workspace and resumes supported agent sessions. `E` adds repositories on the dock branch and adds tabs to a live workspace.
 
-`D` asks for confirmation, snapshots the latest agent metadata, closes the selected workspace and all its tabs and processes, keeps the worktrees, and sets the dock status to `done`. It does not stop the named Herdr server because that could stop unrelated workspaces. Reopening clears the completion time and makes the dock active again.
+`D` marks the dock done and closes its workspace, tabs, and processes. Worktrees and resumable agent sessions remain. Reopening clears the completion time.
 
-`A` remains the destructive archive action. It refuses worktrees with tracked, untracked, or ignored files, rejects symbolic links and relocated worktrees, closes an open workspace, removes verified worktrees, and keeps the Git branches and archived history record.
+`A` is the destructive archive action. It refuses dirty worktrees and reports the path plus an inspection command. It removes verified worktrees but keeps Git branches and the archived history record. Archived docks are hidden until you press `H`.
 
 ---
 
@@ -112,17 +113,14 @@ The overview refreshes this metadata from Herdr. Enter focuses a live workspace.
 ### Quick start
 
 ```sh
-# 1. Install — downloads the repository, builds with Cargo, or fetches a prebuilt binary
+# 1. Install
 herdr plugin install alexkarpandrus/herdr-dock
 
-# 2. Optional — add explicit repositories; the first run prompts for a search directory
-${EDITOR:-vi} "$(herdr plugin config-dir herdr-dock)/config.toml"
-
-# 3. Try it, then bind hotkeys (see below)
+# 2. Create the first dock
 herdr plugin action invoke create --plugin herdr-dock
 ```
 
-The first create run writes a `config.toml` template, then prompts for a directory to scan and records it as a `repository_search_roots` entry. You can also edit the file to add explicit `[[repositories]]` blocks or more search roots.
+The first create flow can install the recommended hotkeys, asks for a repository search root when needed, then creates the dock. You can still edit `config.toml` to add explicit `[[repositories]]` blocks or more search roots.
 
 Requirements:
 
