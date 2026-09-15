@@ -145,6 +145,27 @@ mod tests {
     }
 
     #[test]
+    fn dock_tabs_start_with_root_and_include_every_repository() {
+        let root = PathBuf::from("/dock");
+        let repositories = ["api", "web"].map(|name| DockRepository {
+            name: name.into(),
+            source: PathBuf::from(format!("/repos/{name}")),
+            worktree: root.join(name),
+            base_ref: "HEAD".into(),
+        });
+
+        let labels = |tabs: Vec<DockTab>| tabs.into_iter().map(|tab| tab.label).collect::<Vec<_>>();
+        assert_eq!(
+            labels(default_dock_tabs(&root, &repositories)),
+            ["root", "api", "web"]
+        );
+        assert_eq!(
+            labels(default_dock_tabs(&root, &repositories[..1])),
+            ["root", "api"]
+        );
+    }
+
+    #[test]
     fn overview_keeps_the_state_record_index() -> Result<()> {
         let records: Vec<DockRecord> = serde_json::from_str(
             r#"[
@@ -448,7 +469,10 @@ mod tests {
                 "agent/oauth_login"
             );
         }
-        assert!(fs::read_to_string(root.join("AGENTS.md"))?.contains("api"));
+        let guide = fs::read_to_string(root.join("AGENTS.md"))?;
+        assert!(guide.contains("api"));
+        assert!(guide.contains("herdr agent prompt"));
+        assert!(guide.contains("multiple worker panes"));
         assert_eq!(
             fs::read(root.join("AGENTS.md"))?,
             fs::read(root.join("CLAUDE.md"))?

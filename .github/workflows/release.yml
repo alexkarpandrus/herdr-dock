@@ -1,6 +1,16 @@
 name: release
 
 on:
+  workflow_call:
+    inputs:
+      tag_name:
+        description: Release tag to create or update
+        required: false
+        type: string
+      ref:
+        description: Commit or tag to build
+        required: false
+        type: string
   push:
     tags: ["v*"]
 
@@ -23,8 +33,11 @@ jobs:
             os: ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || inputs.tag_name || github.ref }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
       - name: Install cross linker (Linux aarch64)
@@ -41,6 +54,9 @@ jobs:
           tar -C "target/${{ matrix.target }}/release" \
             -czf "dist/herdr-dock-${{ matrix.target }}.tar.gz" herdr-dock
       - name: Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*.tar.gz
+          tag_name: ${{ inputs.tag_name || github.ref_name }}
+          target_commitish: ${{ inputs.ref || github.sha }}
+          generate_release_notes: true

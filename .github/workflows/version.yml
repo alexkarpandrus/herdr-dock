@@ -1,0 +1,88 @@
+name: version
+
+on:
+  pull_request:
+    branches: [main]
+    types: [closed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+      tag_name: ${{ steps.version.outputs.tag_name }}
+      commit_sha: ${{ steps.version.outputs.commit_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Version Merged Pull Request
+        id: version
+        env:
+          LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          label=$(jq -r '
+            [.[] | select(. == "release:major" or . == "release:minor" or . == "release:patch")]
+            | if length == 0 then "none" elif length == 1 then .[0] else "multiple" end
+          ' <<<"$LABELS_JSON")
+          if [[ "$label" == "none" ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$label" == "multiple" ]]; then
+            echo "A merged pull request must have at most one release label." >&2
+            exit 1
+          fi
+
+          existing_sha=$(git log --format=%H --fixed-strings --grep="Release-PR: #$PR_NUMBER" -1)
+          if [[ -n "$existing_sha" ]]; then
+            version=$(git show "$existing_sha:Cargo.toml" | python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["package"]["version"])')
+            {
+              echo "publish=true"
+              echo "tag_name=v$version"
+              echo "commit_sha=$existing_sha"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          version=$(python3 scripts/bump-version.py "${label#release:}")
+          cargo check --quiet
+          git diff --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Cargo.toml Cargo.lock herdr-plugin.toml
+          git commit -m "release: v$version" -m "Release-PR: #$PR_NUMBER"
+          gh auth setup-git
+          git push origin HEAD:main
+
+          {
+            echo "publish=true"
+            echo "tag_name=v$version"
+            echo "commit_sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    if: needs.version.outputs.publish == 'true'
+    needs: version
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag_name: ${{ needs.version.outputs.tag_name }}
+      ref: ${{ needs.version.outputs.commit_sha }}
