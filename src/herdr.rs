@@ -10,6 +10,8 @@ use std::{
     env,
     path::Path,
     process::Command,
+    thread,
+    time::{Duration, Instant},
 };
 
 pub(crate) fn live_workspaces() -> Result<BTreeMap<String, LiveWorkspace>> {
@@ -260,6 +262,34 @@ pub(crate) fn agent_resume_order(record: &DockRecord) -> Vec<usize> {
     }
     order
 }
+
+pub(crate) fn pane_shell_ready(response: &Value) -> bool {
+    response
+        .pointer("/result/process_info")
+        .and_then(|process| {
+            Some((
+                process.get("foreground_process_group_id")?.as_u64()?,
+                process.get("shell_pid")?.as_u64()?,
+            ))
+        })
+        .is_some_and(|(foreground, shell)| foreground == shell)
+}
+
+fn wait_for_shell(pane_id: &str) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let response = herdr_json(&["pane", "process-info", "--pane", pane_id])?;
+        if pane_shell_ready(&response) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(message(format!(
+                "pane {pane_id} shell did not become ready within 30 seconds"
+            )));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
 pub(crate) fn resume_agents(record: &DockRecord, workspace: &OpenedWorkspace) -> Vec<String> {
     let mut errors = Vec::new();
     let mut occupied_tabs = BTreeSet::new();
@@ -313,6 +343,10 @@ pub(crate) fn resume_agents(record: &DockRecord, workspace: &OpenedWorkspace) ->
             }
         };
         let name = agent_launch_name(record, agent, index);
+        if let Err(error) = wait_for_shell(&pane_id) {
+            errors.push(format!("{name}: {error}"));
+            continue;
+        }
         let mut arguments = vec![
             "agent".into(),
             "start".into(),
