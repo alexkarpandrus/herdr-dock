@@ -343,6 +343,13 @@ mod tests {
             },
         );
         assert_eq!(agent_resume_order(&state.docks[0]), [1, 0]);
+        assert!(pane_shell_ready(&serde_json::json!({
+            "result": {"process_info": {"foreground_process_group_id": 7, "shell_pid": 7}}
+        })));
+        assert!(!pane_shell_ready(&serde_json::json!({
+            "result": {"process_info": {"foreground_process_group_id": 8, "shell_pid": 7}}
+        })));
+        assert!(!pane_shell_ready(&serde_json::json!({})));
         state.docks[0].completed_at_unix = Some(2);
         let overview = build_overview(&state.docks, &BTreeMap::new(), Some("default"));
         assert_eq!(overview[0].status, "done");
