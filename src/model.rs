@@ -147,9 +147,11 @@ pub(crate) struct LiveWorkspace {
 #[derive(Clone)]
 pub(crate) struct LiveTab {
     pub(crate) id: String,
+    pub(crate) pane_id: String,
     pub(crate) label: String,
     pub(crate) cwd: String,
     pub(crate) number: u64,
+    pub(crate) pane_count: usize,
 }
 
 #[derive(Clone)]
@@ -159,6 +161,7 @@ pub(crate) struct AgentOverview {
     pub(crate) status: String,
     pub(crate) cwd: String,
     pub(crate) tab_id: Option<String>,
+    pub(crate) pane_id: Option<String>,
     pub(crate) is_root: bool,
     pub(crate) launch_name: Option<String>,
     pub(crate) session: Option<AgentSession>,

@@ -269,6 +269,7 @@ mod tests {
                 "agent": "codex",
                 "agent_status": "idle",
                 "tab_id": "t1",
+                "pane_id": "p1",
                 "foreground_cwd": temporary,
                 "agent_session": {
                     "source": "herdr:codex",
@@ -279,10 +280,10 @@ mod tests {
             }]}
         });
         let tab_response = serde_json::json!({
-            "result": {"tabs": [{"workspace_id": "w1", "tab_id": "t1", "label": "work", "number": 1}]}
+            "result": {"tabs": [{"workspace_id": "w1", "tab_id": "t1", "label": "work", "number": 1, "pane_count": 1}]}
         });
         let pane_response = serde_json::json!({
-            "result": {"panes": [{"tab_id": "t1", "cwd": temporary}]}
+            "result": {"panes": [{"tab_id": "t1", "pane_id": "p1", "cwd": temporary}]}
         });
         let live = parse_live_workspaces(
             &workspace_response,
@@ -318,6 +319,9 @@ mod tests {
         assert!(!sync_dock_agents(&mut state.docks, &live, Some("default")));
         assert_eq!(state.docks[0].tabs[0].label, "work");
         assert_eq!(state.docks[0].agents[0].tab, Some(0));
+        assert_eq!(live["w1"].tabs[0].pane_id, "p1");
+        assert_eq!(live["w1"].tabs[0].pane_count, 1);
+        assert_eq!(live["w1"].agents[0].pane_id.as_deref(), Some("p1"));
         assert_eq!(
             agent_resume_arguments(&state.docks[0].agents[0]),
             Some(vec!["resume".into(), "session-123".into()])
@@ -583,6 +587,7 @@ mod tests {
                     status: "working".into(),
                     cwd: root.to_string_lossy().into(),
                     tab_id: None,
+                    pane_id: None,
                     is_root: false,
                     launch_name: None,
                     session: None,

@@ -52,7 +52,7 @@ The `herdr-dock.create` action opens a terminal popup that:
 6. writes the goal and repository map to shared `AGENTS.md` and `CLAUDE.md` files; and
 7. opens a `root` tab plus one tab per repository; the root can start and communicate with child agents in any repository.
 
-The `herdr-dock.overview` action opens a kanban board with Working, Closed, Done, and optional Archived columns. Cards show root-session status and child-session counts. Press Enter to focus or reopen a dock, `E` to add repositories, `D` to mark it done and close its workspace, `A` to archive and remove clean worktrees, or `H` to show and hide archived docks. The detail pane expands the root and child session tree plus repository status.
+The `herdr-dock.overview` action opens a kanban board with Working, Closed, Done, and optional Archived columns. Cards show root-session status and child-session counts. `S` starts a same-kind child in a chosen tab, `F` focuses a child, and `X` stops a child split without closing its tab. Manual Herdr spawning remains supported. Press Enter to focus or reopen a dock, `E` to add repositories, `D` to mark it done and close its workspace, `A` to archive and remove clean worktrees, or `H` to show and hide archived docks. The detail pane expands the root and child session tree plus repository status.
 
 The `herdr-dock.setup` action writes the recommended keybindings into your Herdr configuration.
 
