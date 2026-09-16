@@ -355,6 +355,8 @@ mod tests {
         })));
         assert!(!pane_shell_ready(&serde_json::json!({})));
         state.docks[0].completed_at_unix = Some(2);
+        let open_done = build_overview(&state.docks, &live, Some("default"));
+        assert!(open_done[0].open);
         let overview = build_overview(&state.docks, &BTreeMap::new(), Some("default"));
         assert_eq!(overview[0].status, "done");
         assert_eq!(overview[0].agents[0].status, "done");
