@@ -55,19 +55,22 @@ pub(crate) fn parse_live_workspaces(
         }
     }
 
-    let mut tab_cwds = BTreeMap::new();
+    let mut tab_panes = BTreeMap::new();
     if let Some(items) = pane_response
         .pointer("/result/panes")
         .and_then(Value::as_array)
     {
         for pane in items {
-            if let (Some(tab_id), Some(cwd)) = (
+            if let (Some(tab_id), Some(pane_id), Some(cwd)) = (
                 pane.get("tab_id").and_then(Value::as_str),
+                pane.get("pane_id").and_then(Value::as_str),
                 pane.get("cwd")
                     .and_then(Value::as_str)
                     .or_else(|| pane.get("foreground_cwd").and_then(Value::as_str)),
             ) {
-                tab_cwds.entry(tab_id.to_owned()).or_insert(cwd.to_owned());
+                tab_panes
+                    .entry(tab_id.to_owned())
+                    .or_insert((pane_id.to_owned(), cwd.to_owned()));
             }
         }
     }
@@ -87,16 +90,24 @@ pub(crate) fn parse_live_workspaces(
             };
             workspace.tabs.push(LiveTab {
                 id: id.into(),
+                pane_id: tab_panes
+                    .get(id)
+                    .map(|(pane_id, _)| pane_id.clone())
+                    .unwrap_or_default(),
                 label: tab
                     .get("label")
                     .and_then(Value::as_str)
                     .unwrap_or("tab")
                     .into(),
-                cwd: tab_cwds.get(id).cloned().unwrap_or_default(),
+                cwd: tab_panes
+                    .get(id)
+                    .map(|(_, cwd)| cwd.clone())
+                    .unwrap_or_default(),
                 number: tab
                     .get("number")
                     .and_then(Value::as_u64)
                     .unwrap_or(u64::MAX),
+                pane_count: tab.get("pane_count").and_then(Value::as_u64).unwrap_or(1) as usize,
             });
         }
     }
@@ -145,6 +156,10 @@ pub(crate) fn parse_live_workspaces(
                     .into(),
                 tab_id: agent
                     .get("tab_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                pane_id: agent
+                    .get("pane_id")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
                 is_root: false,
@@ -289,6 +304,81 @@ fn wait_for_shell(pane_id: &str) -> Result<()> {
         }
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn child_agent_name(record: &DockRecord, workspace: &LiveWorkspace) -> String {
+    let stem = format!(
+        "dock-{}-child",
+        record
+            .slug
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+            .collect::<String>()
+    );
+    let mut number = 1;
+    loop {
+        let suffix = format!("-{number}");
+        let mut name = stem.clone();
+        name.truncate(32 - suffix.len());
+        name.push_str(&suffix);
+        if workspace
+            .agents
+            .iter()
+            .all(|agent| agent.launch_name.as_deref() != Some(&name))
+        {
+            return name;
+        }
+        number += 1;
+    }
+}
+
+pub(crate) fn spawn_child(
+    record: &DockRecord,
+    workspace: &LiveWorkspace,
+    tab_index: usize,
+) -> Result<String> {
+    let root_tab = workspace
+        .tabs
+        .iter()
+        .find(|tab| tab.label == "root" || Path::new(&tab.cwd) == record.root);
+    let root = workspace
+        .agents
+        .iter()
+        .find(|agent| {
+            root_tab.is_some_and(|tab| agent.tab_id.as_deref() == Some(&tab.id))
+                || Path::new(&agent.cwd) == record.root
+        })
+        .ok_or_else(|| message("start the dock root agent before spawning a child"))?;
+    let tab = workspace
+        .tabs
+        .get(tab_index)
+        .ok_or_else(|| message("selected dock tab is no longer available"))?;
+    if tab.pane_id.is_empty() || tab.cwd.is_empty() {
+        return Err(message("selected dock tab has no available pane"));
+    }
+    let response = herdr_json(&[
+        "pane",
+        "split",
+        &tab.pane_id,
+        "--direction",
+        "right",
+        "--cwd",
+        &tab.cwd,
+        "--no-focus",
+    ])?;
+    let pane_id = json_string(&response, "/result/pane/pane_id")?;
+    let name = child_agent_name(record, workspace);
+    let result = wait_for_shell(&pane_id).and_then(|()| {
+        herdr(&[
+            "agent", "start", &name, "--kind", &root.kind, "--pane", &pane_id,
+        ])
+        .map(drop)
+    });
+    if let Err(error) = result {
+        let _ = herdr(&["pane", "close", &pane_id]);
+        return Err(error);
+    }
+    Ok(name)
 }
 pub(crate) fn resume_agents(record: &DockRecord, workspace: &OpenedWorkspace) -> Vec<String> {
     let mut errors = Vec::new();

@@ -294,6 +294,46 @@ pub(crate) fn confirm_archive(ui: &mut Ui, dock: &DockOverview) -> Result<bool> 
         }
     }
 }
+
+pub(crate) fn prompt_choice(ui: &mut Ui, title: &str, choices: &[String]) -> Result<Option<usize>> {
+    if choices.is_empty() {
+        return Ok(None);
+    }
+    let mut cursor = 0;
+    loop {
+        let mut lines = choices
+            .iter()
+            .enumerate()
+            .map(|(index, choice)| format!("{} {choice}", if index == cursor { ">" } else { " " }))
+            .collect::<Vec<_>>();
+        lines.extend([String::new(), "↑/↓ move · Enter select · Esc cancel".into()]);
+        ui.frame(title, &lines)?;
+        match read_key()?.code {
+            KeyCode::Up => cursor = cursor.saturating_sub(1),
+            KeyCode::Down => cursor = (cursor + 1).min(choices.len() - 1),
+            KeyCode::Enter => return Ok(Some(cursor)),
+            KeyCode::Esc => return Ok(None),
+            _ => {}
+        }
+    }
+}
+
+pub(crate) fn confirm_stop_child(ui: &mut Ui, name: &str) -> Result<bool> {
+    ui.frame(
+        "Stop child session",
+        &[
+            format!("Child: {name}"),
+            String::new(),
+            "This closes the child pane. Its resumable session remains on disk.".into(),
+            String::new(),
+            "Y stop child · any other key cancel".into(),
+        ],
+    )?;
+    Ok(matches!(
+        read_key()?.code,
+        KeyCode::Char('y') | KeyCode::Char('Y')
+    ))
+}
 pub(crate) fn confirm_complete(ui: &mut Ui, dock: &DockOverview) -> Result<bool> {
     ui.frame(
         "Mark dock done and close",

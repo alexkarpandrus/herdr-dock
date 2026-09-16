@@ -6,14 +6,15 @@ use crate::dock::{
     sync_dock_agents,
 };
 use crate::git::optional_git;
-use crate::herdr::{current_herdr_session, herdr, live_workspaces};
+use crate::herdr::{current_herdr_session, herdr, live_workspaces, spawn_child};
 use crate::model::{
     AgentOverview, DockOverview, DockRecord, LiveWorkspace, RepositoryOverview, State, load_state,
     lock_state, save_state,
 };
 use crate::repos::required_directory;
 use crate::ui::{
-    Segment, Ui, confirm_archive, confirm_complete, plain, read_key, show_notice, styled,
+    Segment, Ui, confirm_archive, confirm_complete, confirm_stop_child, plain, prompt_choice,
+    read_key, show_notice, styled,
 };
 use crossterm::event::KeyCode;
 use crossterm::style::Color;
@@ -48,7 +49,7 @@ fn overview_hint(dock: &DockOverview) -> String {
         "↑↓ move · ←→ column · Enter reopen · A archive · H archived · / filter · ? help · Esc close"
             .into()
     } else {
-        "↑↓ move · ←→ column · Enter focus/reopen · E add repo · D done · A archive · H archived · ? help"
+        "↑↓ move · ←→ column · Enter focus/reopen · S/F/X child · E repo · D done · A archive · ? help"
             .into()
     }
 }
@@ -59,6 +60,7 @@ fn show_help(ui: &mut Ui) -> Result<()> {
         vec![plain(
             "  ↑↓ move ←→ column    Enter focus/reopen    E add repository",
         )],
+        vec![plain("  S spawn child    F focus child    X stop child")],
         vec![plain(
             "  D mark done and close    A archive    H show/hide archived",
         )],
@@ -466,6 +468,23 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
+fn select_child(
+    ui: &mut Ui,
+    title: &str,
+    children: &[AgentOverview],
+) -> Result<Option<AgentOverview>> {
+    let choices = children
+        .iter()
+        .map(|agent| {
+            format!(
+                "{} ({}) [{}] · {}",
+                agent.name, agent.kind, agent.status, agent.cwd
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(prompt_choice(ui, title, &choices)?.map(|index| children[index].clone()))
+}
+
 pub(crate) fn show_overview() -> Result<()> {
     let state_dir = required_directory("HERDR_PLUGIN_STATE_DIR")?;
     let state_path = state_dir.join("state.json");
@@ -590,6 +609,150 @@ pub(crate) fn show_overview() -> Result<()> {
             KeyCode::Right if !filtering => cursor = move_cursor(&docks, &matches, cursor, "right"),
             KeyCode::Char('r') | KeyCode::Char('R') if !filtering => {
                 docks = collect_overview(&mut state, &state_path, current_session.as_deref())?;
+            }
+            KeyCode::Char('s') | KeyCode::Char('S') if !filtering && !matches.is_empty() => {
+                let dock = &docks[matches[cursor]];
+                if !dock.open || dock.archived || dock.done {
+                    continue;
+                }
+                let index = dock.record_index;
+                if let Err(error) =
+                    check_dock_session(&state.docks[index], current_session.as_deref())
+                {
+                    show_notice(&mut ui, "Child not started", &error.to_string())?;
+                    continue;
+                }
+                let live = match live_workspaces() {
+                    Ok(live) => live,
+                    Err(error) => {
+                        show_notice(&mut ui, "Child not started", &error.to_string())?;
+                        continue;
+                    }
+                };
+                let Some(workspace) = live.get(&state.docks[index].workspace_id) else {
+                    show_notice(&mut ui, "Child not started", "Dock workspace is not open.")?;
+                    continue;
+                };
+                let choices = workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| format!("{} · {}", tab.label, tab.cwd))
+                    .collect::<Vec<_>>();
+                let Some(tab_index) = prompt_choice(&mut ui, "Spawn child · choose tab", &choices)?
+                else {
+                    continue;
+                };
+                match spawn_child(&state.docks[index], workspace, tab_index) {
+                    Ok(name) => {
+                        show_notice(
+                            &mut ui,
+                            "Child started",
+                            &format!("Started {name} in {}.", workspace.tabs[tab_index].label),
+                        )?;
+                        docks =
+                            collect_overview(&mut state, &state_path, current_session.as_deref())?;
+                    }
+                    Err(error) => show_notice(&mut ui, "Child not started", &error.to_string())?,
+                }
+            }
+            KeyCode::Char('f') | KeyCode::Char('F') if !filtering && !matches.is_empty() => {
+                let dock = &docks[matches[cursor]];
+                let children = dock
+                    .agents
+                    .iter()
+                    .filter(|agent| !agent.is_root && agent.pane_id.is_some())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if children.is_empty() {
+                    show_notice(
+                        &mut ui,
+                        "No child sessions",
+                        "This dock has no live children.",
+                    )?;
+                    continue;
+                }
+                let Some(child) = select_child(&mut ui, "Focus child", &children)? else {
+                    continue;
+                };
+                let index = dock.record_index;
+                let Some(target) = child.pane_id else {
+                    continue;
+                };
+                drop(ui);
+                let result = check_dock_session(&state.docks[index], current_session.as_deref())
+                    .and_then(|()| herdr(&["agent", "focus", &target]).map(drop));
+                match result {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        ui = Ui::start()?;
+                        show_notice(&mut ui, "Child not focused", &error.to_string())?;
+                    }
+                }
+            }
+            KeyCode::Char('x') | KeyCode::Char('X') if !filtering && !matches.is_empty() => {
+                let dock = &docks[matches[cursor]];
+                if !dock.open || dock.archived {
+                    continue;
+                }
+                let index = dock.record_index;
+                let live = match live_workspaces() {
+                    Ok(live) => live,
+                    Err(error) => {
+                        show_notice(&mut ui, "Child not stopped", &error.to_string())?;
+                        continue;
+                    }
+                };
+                let Some(workspace) = live.get(&state.docks[index].workspace_id) else {
+                    show_notice(&mut ui, "Child not stopped", "Dock workspace is not open.")?;
+                    continue;
+                };
+                let children = dock
+                    .agents
+                    .iter()
+                    .filter(|agent| {
+                        !agent.is_root
+                            && agent.pane_id.is_some()
+                            && agent.tab_id.as_ref().is_some_and(|tab_id| {
+                                workspace
+                                    .tabs
+                                    .iter()
+                                    .find(|tab| tab.id == *tab_id)
+                                    .is_some_and(|tab| tab.pane_count > 1)
+                            })
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if children.is_empty() {
+                    show_notice(
+                        &mut ui,
+                        "No safe child pane",
+                        "Dock only stops a child when another pane keeps its tab open.",
+                    )?;
+                    continue;
+                }
+                let Some(child) = select_child(&mut ui, "Stop child", &children)? else {
+                    continue;
+                };
+                if !confirm_stop_child(&mut ui, &child.name)? {
+                    continue;
+                }
+                let Some(target) = child.pane_id else {
+                    continue;
+                };
+                let result = check_dock_session(&state.docks[index], current_session.as_deref())
+                    .and_then(|()| herdr(&["pane", "close", &target]).map(drop));
+                match result {
+                    Ok(()) => {
+                        docks =
+                            collect_overview(&mut state, &state_path, current_session.as_deref())?;
+                        show_notice(
+                            &mut ui,
+                            "Child stopped",
+                            &format!("Stopped {}.", child.name),
+                        )?;
+                    }
+                    Err(error) => show_notice(&mut ui, "Child not stopped", &error.to_string())?,
+                }
             }
             KeyCode::Char('e') | KeyCode::Char('E') if !filtering && !matches.is_empty() => {
                 let dock = &docks[matches[cursor]];
@@ -863,6 +1026,7 @@ pub(crate) fn build_overview(
                             status: if done { "done" } else { "saved" }.into(),
                             cwd: agent.cwd.to_string_lossy().into(),
                             tab_id: None,
+                            pane_id: None,
                             is_root: false,
                             launch_name: agent.name.clone(),
                             session: agent.session.clone(),
