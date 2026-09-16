@@ -1,6 +1,6 @@
 use crate::Result;
 use crate::archive::archive_dock;
-use crate::create::add_repositories_to_dock;
+use crate::create::{add_repositories_to_dock, create_dock, update_dock_goal};
 use crate::dock::{
     check_dock_session, ensure_no_live_legacy_workspace, legacy_workspace_is_live, reopen_dock,
     sync_dock_agents,
@@ -11,6 +11,7 @@ use crate::model::{
     AgentOverview, DockOverview, DockRecord, LiveWorkspace, RepositoryOverview, State, load_state,
     lock_state, save_state,
 };
+use crate::prompts::prompt_goal;
 use crate::repos::required_directory;
 use crate::ui::{
     Segment, Ui, confirm_archive, confirm_done, confirm_park, confirm_stop_child, plain,
@@ -44,7 +45,7 @@ fn status_segment(status: &str) -> Segment {
 
 fn overview_hint(dock: &DockOverview) -> String {
     if dock.archived {
-        return "↑↓ move · ←→ column · H archived · / filter · R refresh · ? help · Esc close"
+        return "↑↓ move · ←→ column · N new · H archived · / filter · R refresh · ? help · Esc close"
             .into();
     }
     let open = if dock.open { "focus" } else { "reopen" };
@@ -59,7 +60,7 @@ fn overview_hint(dock: &DockOverview) -> String {
     let add_repo = if dock.done { "" } else { " · E repo" };
     let lifecycle = if dock.done { "D active" } else { "D done" };
     format!(
-        "↑↓ move · ←→ column · Enter {open}{park}{child}{add_repo} · {lifecycle} · A archive · H archived · ? help"
+        "↑↓ move · ←→ column · Enter {open}{park}{child}{add_repo} · G goal · N new · {lifecycle} · A archive · H archived · ? help"
     )
 }
 
@@ -69,6 +70,7 @@ fn show_help(ui: &mut Ui) -> Result<()> {
         vec![plain(
             "  ↑↓ move ←→ column    Enter focus/reopen    E add repository",
         )],
+        vec![plain("  N new dock    G edit goal")],
         vec![plain("  S spawn child    F focus child    X stop child")],
         vec![plain(
             "  C park workspace    D toggle done/active    A archive",
@@ -499,7 +501,7 @@ fn select_child(
 pub(crate) fn show_overview() -> Result<()> {
     let state_dir = required_directory("HERDR_PLUGIN_STATE_DIR")?;
     let state_path = state_dir.join("state.json");
-    let _state_lock = lock_state(&state_path)?;
+    let state_lock = lock_state(&state_path)?;
     let mut state = load_state(&state_path)?;
     if state.docks.is_empty() {
         let mut ui = Ui::start()?;
@@ -508,16 +510,19 @@ pub(crate) fn show_overview() -> Result<()> {
             &[
                 "No docks yet.".into(),
                 String::new(),
-                "Create one with prefix+d, or run:".into(),
-                "  herdr plugin action invoke create --plugin herdr-dock".into(),
+                "Press N to create one.".into(),
                 String::new(),
                 "Add the hotkeys with:".into(),
                 "  herdr plugin action invoke setup --plugin herdr-dock".into(),
                 String::new(),
-                "Press any key to close.".into(),
+                "Any other key closes the overview.".into(),
             ],
         )?;
-        read_key()?;
+        if matches!(read_key()?.code, KeyCode::Char('n') | KeyCode::Char('N')) {
+            drop(ui);
+            drop(state_lock);
+            return create_dock();
+        }
         return Ok(());
     }
 
@@ -552,7 +557,7 @@ pub(crate) fn show_overview() -> Result<()> {
             && docks.iter().any(|dock| dock.archived)
         {
             lines = vec![vec![plain(
-                "No active docks. Press H to show archived docks.",
+                "No active docks. Press N to create or H to show archived docks.",
             )]];
         }
 
@@ -576,7 +581,7 @@ pub(crate) fn show_overview() -> Result<()> {
             lines.push(vec![styled(Color::Cyan, format!("Filter: {filter}"))]);
         }
         lines.push(vec![plain(if matches.is_empty() {
-            "H show/hide archived · / filter · Esc close".into()
+            "N new dock · H show/hide archived · / filter · Esc close".into()
         } else if filtering {
             "Type to filter · Enter done · Esc clear".into()
         } else {
@@ -620,6 +625,36 @@ pub(crate) fn show_overview() -> Result<()> {
             KeyCode::Right if !filtering => cursor = move_cursor(&docks, &matches, cursor, "right"),
             KeyCode::Char('r') | KeyCode::Char('R') if !filtering => {
                 docks = collect_overview(&mut state, &state_path, current_session.as_deref())?;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') if !filtering => {
+                drop(ui);
+                drop(state_lock);
+                return create_dock();
+            }
+            KeyCode::Char('g') | KeyCode::Char('G') if !filtering && !matches.is_empty() => {
+                let dock = &docks[matches[cursor]];
+                if dock.archived {
+                    continue;
+                }
+                let index = dock.record_index;
+                let title = format!("Edit goal · {}", dock.name);
+                let Some(goal) = prompt_goal(
+                    &mut ui,
+                    &title,
+                    state.docks[index].goal.as_deref().unwrap_or_default(),
+                )?
+                else {
+                    continue;
+                };
+                let goal = (!goal.is_empty()).then_some(goal);
+                match update_dock_goal(&mut state, index, &state_path, goal) {
+                    Ok(()) => {
+                        docks =
+                            collect_overview(&mut state, &state_path, current_session.as_deref())?;
+                        show_notice(&mut ui, "Goal saved", "Updated the dock agent guides.")?;
+                    }
+                    Err(error) => show_notice(&mut ui, "Goal not saved", &error.to_string())?,
+                }
             }
             KeyCode::Char('s') | KeyCode::Char('S') if !filtering && !matches.is_empty() => {
                 let dock = &docks[matches[cursor]];

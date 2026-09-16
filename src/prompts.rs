@@ -43,11 +43,11 @@ pub(crate) fn prompt_name(ui: &mut Ui, prefix: &str) -> Result<Option<String>> {
         }
     }
 }
-pub(crate) fn prompt_goal(ui: &mut Ui) -> Result<Option<String>> {
-    let mut line = Line::new();
+pub(crate) fn prompt_goal(ui: &mut Ui, title: &str, initial: &str) -> Result<Option<String>> {
+    let mut line = Line::with_text(initial);
     loop {
         ui.frame(
-            "Create dock · 2/6 goal",
+            title,
             &[
                 "What should the agents deliver?".into(),
                 String::new(),
