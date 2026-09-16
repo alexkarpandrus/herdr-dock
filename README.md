@@ -14,6 +14,7 @@
 
 <p align="center">
   <a href="https://github.com/alexkarpandrus/herdr-dock/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/alexkarpandrus/herdr-dock/ci.yml?branch=main&label=CI&style=flat-square" alt="CI status" /></a>
+  <a href="https://github.com/alexkarpandrus/herdr-dock/releases/latest"><img src="https://img.shields.io/github/v/release/alexkarpandrus/herdr-dock?style=flat-square" alt="Latest release" /></a>
   <a href="https://crates.io/"><img src="https://img.shields.io/badge/rust-1.89%2B-orange?style=flat-square&logo=rust" alt="Rust 1.89+" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License MIT" /></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-1f2937?style=flat-square" alt="macOS & Linux" />
