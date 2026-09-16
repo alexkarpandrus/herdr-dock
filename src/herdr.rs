@@ -145,6 +145,7 @@ pub(crate) fn parse_live_workspaces(
                     .get("tab_id")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                is_root: false,
                 launch_name,
                 session,
             });
@@ -243,10 +244,27 @@ pub(crate) fn add_workspace_tab(workspace_id: &str, tab: &DockTab) -> Result<Str
     ])?;
     json_string(&response, "/result/tab/tab_id")
 }
+pub(crate) fn agent_resume_order(record: &DockRecord) -> Vec<usize> {
+    let root_tab = record
+        .tabs
+        .iter()
+        .position(|tab| tab.label == "root" || tab.cwd == record.root)
+        .unwrap_or(0);
+    let mut order = (0..record.agents.len()).collect::<Vec<_>>();
+    if let Some(position) = order.iter().position(|index| {
+        let agent = &record.agents[*index];
+        agent.tab == Some(root_tab) || agent.cwd == record.root
+    }) {
+        let root = order.remove(position);
+        order.insert(0, root);
+    }
+    order
+}
 pub(crate) fn resume_agents(record: &DockRecord, workspace: &OpenedWorkspace) -> Vec<String> {
     let mut errors = Vec::new();
     let mut occupied_tabs = BTreeSet::new();
-    for (index, agent) in record.agents.iter().enumerate() {
+    for index in agent_resume_order(record) {
+        let agent = &record.agents[index];
         let Some(resume_arguments) = agent_resume_arguments(agent) else {
             errors.push(format!(
                 "{} has no supported resumable session",

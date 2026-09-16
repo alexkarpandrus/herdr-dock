@@ -159,6 +159,7 @@ pub(crate) struct AgentOverview {
     pub(crate) status: String,
     pub(crate) cwd: String,
     pub(crate) tab_id: Option<String>,
+    pub(crate) is_root: bool,
     pub(crate) launch_name: Option<String>,
     pub(crate) session: Option<AgentSession>,
 }
