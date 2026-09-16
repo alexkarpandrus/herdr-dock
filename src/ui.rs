@@ -334,16 +334,42 @@ pub(crate) fn confirm_stop_child(ui: &mut Ui, name: &str) -> Result<bool> {
         KeyCode::Char('y') | KeyCode::Char('Y')
     ))
 }
-pub(crate) fn confirm_complete(ui: &mut Ui, dock: &DockOverview) -> Result<bool> {
+pub(crate) fn confirm_done(ui: &mut Ui, dock: &DockOverview, marking_done: bool) -> Result<bool> {
+    let action = if marking_done {
+        "mark done"
+    } else {
+        "mark active"
+    };
     ui.frame(
-        "Mark dock done and close",
+        if marking_done {
+            "Mark dock done"
+        } else {
+            "Mark dock active"
+        },
         &[
             format!("Dock: {}", dock.name),
             String::new(),
-            "This marks the dock done and closes its workspace, tabs, and processes.".into(),
-            "Worktrees and resumable agent session IDs remain.".into(),
+            "This changes lifecycle status only. The workspace stays as it is.".into(),
             String::new(),
-            "Y mark done and close · any other key cancel".into(),
+            format!("Y {action} · any other key cancel"),
+        ],
+    )?;
+    Ok(matches!(
+        read_key()?.code,
+        KeyCode::Char('y') | KeyCode::Char('Y')
+    ))
+}
+
+pub(crate) fn confirm_park(ui: &mut Ui, dock: &DockOverview) -> Result<bool> {
+    ui.frame(
+        "Park dock workspace",
+        &[
+            format!("Dock: {}", dock.name),
+            String::new(),
+            "This closes the workspace, tabs, and processes.".into(),
+            "Worktrees, lifecycle status, and resumable agent sessions remain.".into(),
+            String::new(),
+            "Y park workspace · any other key cancel".into(),
         ],
     )?;
     Ok(matches!(

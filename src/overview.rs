@@ -13,8 +13,8 @@ use crate::model::{
 };
 use crate::repos::required_directory;
 use crate::ui::{
-    Segment, Ui, confirm_archive, confirm_complete, confirm_stop_child, plain, prompt_choice,
-    read_key, show_notice, styled,
+    Segment, Ui, confirm_archive, confirm_done, confirm_park, confirm_stop_child, plain,
+    prompt_choice, read_key, show_notice, styled,
 };
 use crossterm::event::KeyCode;
 use crossterm::style::Color;
@@ -44,14 +44,23 @@ fn status_segment(status: &str) -> Segment {
 
 fn overview_hint(dock: &DockOverview) -> String {
     if dock.archived {
-        "↑↓ move · ←→ column · H archived · / filter · R refresh · ? help · Esc close".into()
-    } else if dock.done {
-        "↑↓ move · ←→ column · Enter reopen · A archive · H archived · / filter · ? help · Esc close"
-            .into()
-    } else {
-        "↑↓ move · ←→ column · Enter focus/reopen · S/F/X child · E repo · D done · A archive · ? help"
-            .into()
+        return "↑↓ move · ←→ column · H archived · / filter · R refresh · ? help · Esc close"
+            .into();
     }
+    let open = if dock.open { "focus" } else { "reopen" };
+    let park = if dock.open { " · C park" } else { "" };
+    let child = if dock.open && dock.done {
+        " · F/X child"
+    } else if dock.open {
+        " · S/F/X child"
+    } else {
+        ""
+    };
+    let add_repo = if dock.done { "" } else { " · E repo" };
+    let lifecycle = if dock.done { "D active" } else { "D done" };
+    format!(
+        "↑↓ move · ←→ column · Enter {open}{park}{child}{add_repo} · {lifecycle} · A archive · H archived · ? help"
+    )
 }
 
 fn show_help(ui: &mut Ui) -> Result<()> {
@@ -62,9 +71,11 @@ fn show_help(ui: &mut Ui) -> Result<()> {
         )],
         vec![plain("  S spawn child    F focus child    X stop child")],
         vec![plain(
-            "  D mark done and close    A archive    H show/hide archived",
+            "  C park workspace    D toggle done/active    A archive",
         )],
-        vec![plain("  / filter    R refresh    Esc close    ? help")],
+        vec![plain(
+            "  H show/hide archived    / filter    R refresh    Esc close    ? help",
+        )],
         vec![plain(String::new())],
         vec![plain("Status colors")],
         vec![
@@ -790,40 +801,58 @@ pub(crate) fn show_overview() -> Result<()> {
                     }
                 }
             }
-            KeyCode::Char('d') | KeyCode::Char('D') if !filtering && !matches.is_empty() => {
+            KeyCode::Char('c') | KeyCode::Char('C') if !filtering && !matches.is_empty() => {
                 let dock = &docks[matches[cursor]];
-                if dock.archived || dock.done {
+                if dock.archived || !dock.open {
                     continue;
                 }
                 let index = dock.record_index;
-                let open = dock.open;
-                if !confirm_complete(&mut ui, dock)? {
+                if !confirm_park(&mut ui, dock)? {
                     continue;
                 }
-                let completed_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
                 drop(ui);
-                let complete_result = (|| -> Result<()> {
+                let park_result = (|| -> Result<()> {
                     check_dock_session(&state.docks[index], current_session.as_deref())?;
-                    if open {
-                        let live = live_workspaces()?;
-                        if sync_dock_agents(&mut state.docks, &live, current_session.as_deref()) {
-                            save_state(&state_path, &state)?;
-                        }
-                        herdr(&["workspace", "close", &state.docks[index].workspace_id])?;
+                    let live = live_workspaces()?;
+                    if sync_dock_agents(&mut state.docks, &live, current_session.as_deref()) {
+                        save_state(&state_path, &state)?;
                     }
-                    state.docks[index].completed_at_unix = Some(completed_at);
-                    if state.docks[index].herdr_session.is_none() {
-                        state.docks[index].herdr_session = current_session.clone();
-                    }
-                    save_state(&state_path, &state)
+                    herdr(&["workspace", "close", &state.docks[index].workspace_id]).map(drop)
                 })();
                 ui = Ui::start()?;
-                match complete_result {
+                match park_result {
                     Ok(()) => {
                         docks =
                             collect_overview(&mut state, &state_path, current_session.as_deref())?
                     }
-                    Err(error) => show_notice(&mut ui, "Dock not marked done", &error.to_string())?,
+                    Err(error) => show_notice(&mut ui, "Dock not parked", &error.to_string())?,
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') if !filtering && !matches.is_empty() => {
+                let dock = &docks[matches[cursor]];
+                if dock.archived {
+                    continue;
+                }
+                let index = dock.record_index;
+                let marking_done = !dock.done;
+                if !confirm_done(&mut ui, dock, marking_done)? {
+                    continue;
+                }
+                let previous = state.docks[index].completed_at_unix;
+                state.docks[index].completed_at_unix = if marking_done {
+                    Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+                } else {
+                    None
+                };
+                match save_state(&state_path, &state) {
+                    Ok(()) => {
+                        docks =
+                            collect_overview(&mut state, &state_path, current_session.as_deref())?
+                    }
+                    Err(error) => {
+                        state.docks[index].completed_at_unix = previous;
+                        show_notice(&mut ui, "Dock status not changed", &error.to_string())?;
+                    }
                 }
             }
             KeyCode::Char('a') | KeyCode::Char('A') if !filtering && !matches.is_empty() => {

@@ -168,7 +168,6 @@ pub(crate) fn reopen_dock(
     let opened = open_workspace(&state.docks[index].name, &dock_tabs)?;
     let previous_workspace_id =
         std::mem::replace(&mut state.docks[index].workspace_id, opened.id.clone());
-    let previous_completed = state.docks[index].completed_at_unix.take();
     let previous_session = state.docks[index].herdr_session.clone();
     let previous_tabs = std::mem::replace(&mut state.docks[index].tabs, dock_tabs);
     if let Some(session) = current_session {
@@ -176,7 +175,6 @@ pub(crate) fn reopen_dock(
     }
     if let Err(error) = save_state(state_path, state) {
         state.docks[index].workspace_id = previous_workspace_id;
-        state.docks[index].completed_at_unix = previous_completed;
         state.docks[index].herdr_session = previous_session;
         state.docks[index].tabs = previous_tabs;
         let _ = herdr(&["workspace", "close", &opened.id]);

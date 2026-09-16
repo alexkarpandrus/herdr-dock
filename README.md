@@ -52,7 +52,7 @@ The `herdr-dock.create` action opens a terminal popup that:
 6. writes the goal and repository map to shared `AGENTS.md` and `CLAUDE.md` files; and
 7. opens a `root` tab plus one tab per repository; the root can start and communicate with child agents in any repository.
 
-The `herdr-dock.overview` action opens a kanban board with Working, Closed, Done, and optional Archived columns. Cards show root-session status and child-session counts. `S` starts a same-kind child in a chosen tab, `F` focuses a child, and `X` stops a child split without closing its tab. Manual Herdr spawning remains supported. Press Enter to focus or reopen a dock, `E` to add repositories, `D` to mark it done and close its workspace, `A` to archive and remove clean worktrees, or `H` to show and hide archived docks. The detail pane expands the root and child session tree plus repository status.
+The `herdr-dock.overview` action opens a kanban board with Working, Closed, Done, and optional Archived columns. Cards show root-session status and child-session counts. `S` starts a same-kind child in a chosen tab, `F` focuses a child, and `X` stops a child split without closing its tab. Manual Herdr spawning remains supported. Press Enter to focus or reopen a dock, `E` to add repositories, `C` to park its workspace, `D` to toggle done and active status, `A` to archive and remove clean worktrees, or `H` to show and hide archived docks. Parking preserves lifecycle status, worktrees, and resumable agent sessions. Reopening a done dock keeps it done until you press `D`. The detail pane expands the root and child session tree plus repository status.
 
 The `herdr-dock.setup` action writes the recommended keybindings into your Herdr configuration.
 
@@ -102,7 +102,7 @@ Each dock record stores its goal, Herdr session, workspace ID, tabs, repositorie
 
 The overview refreshes this metadata from Herdr and displays the root session above its children. Enter focuses a live workspace or recreates a closed workspace, resumes the root first, and then resumes supported child sessions. Missing or unsupported sessions are reported without blocking the remaining sessions. `E` adds repositories on the dock branch and adds tabs to a live workspace.
 
-`D` marks the dock done and closes its workspace, tabs, and processes. Worktrees and resumable agent sessions remain. Reopening clears the completion time.
+`C` parks the workspace, tabs, and processes while preserving worktrees, lifecycle status, and resumable agent sessions. `D` toggles done and active status without changing the workspace. Reopening preserves that status.
 
 `A` is the destructive archive action. It refuses dirty worktrees and reports the path plus an inspection command. It removes verified worktrees but keeps Git branches and the archived history record. Archived docks are hidden until you press `H`.
 
