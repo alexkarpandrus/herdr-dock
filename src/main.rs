@@ -579,6 +579,30 @@ mod tests {
                 })
                 .collect(),
         };
+        let state_path = temporary.join("state.json");
+        let mut goal_state = State {
+            docks: vec![record],
+            ..State::default()
+        };
+        update_dock_goal(
+            &mut goal_state,
+            0,
+            &state_path,
+            Some("Ship the revised OAuth flow".into()),
+        )?;
+        assert_eq!(
+            load_state(&state_path)?.docks[0].goal.as_deref(),
+            Some("Ship the revised OAuth flow")
+        );
+        assert!(
+            fs::read_to_string(root.join("AGENTS.md"))?
+                .contains("## Goal\n\nShip the revised OAuth flow")
+        );
+        assert_eq!(
+            fs::read(root.join("AGENTS.md"))?,
+            fs::read(root.join("CLAUDE.md"))?
+        );
+        record = goal_state.docks.remove(0);
         let live = BTreeMap::from([(
             "workspace-1".into(),
             LiveWorkspace {

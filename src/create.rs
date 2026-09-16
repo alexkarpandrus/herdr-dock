@@ -2,7 +2,8 @@ use crate::Result;
 use crate::git::{check_branch_name, default_base_ref, git_refs, local_branch_exists, message};
 use crate::herdr::{add_workspace_tab, current_herdr_session, herdr, open_workspace};
 use crate::model::{
-    DockRecord, DockRepository, DockTab, RepositoryPlan, load_state, lock_state, save_state,
+    DockRecord, DockRepository, DockTab, Repository, RepositoryPlan, State, load_state, lock_state,
+    save_state,
 };
 use crate::prompts::{
     prompt_base_ref, prompt_branch, prompt_directory, prompt_goal, prompt_name,
@@ -69,7 +70,7 @@ pub(crate) fn create_dock() -> Result<()> {
         let Some(name) = prompt_name(&mut ui, &config.branch_prefix)? else {
             return Ok(());
         };
-        let Some(goal) = prompt_goal(&mut ui)? else {
+        let Some(goal) = prompt_goal(&mut ui, "Create dock · 2/6 goal", "")? else {
             return Ok(());
         };
         let default_branch = format!("{}/{}", config.branch_prefix, slugify(&name));
@@ -611,6 +612,58 @@ pub(crate) fn materialize_worktrees(
         ));
     }
     Ok(created.into_iter().map(|(_, path)| path).collect())
+}
+
+fn write_dock_agent_guides(record: &DockRecord) -> Result<()> {
+    let plans = record
+        .repositories
+        .iter()
+        .map(|repository| RepositoryPlan {
+            repository: Repository {
+                name: repository.name.clone(),
+                path: repository.source.clone(),
+            },
+            base_ref: repository.base_ref.clone(),
+        })
+        .collect::<Vec<_>>();
+    write_agent_guides(
+        &record.root,
+        &record.name,
+        record.goal.as_deref(),
+        &record.branch,
+        &plans,
+    )
+}
+
+pub(crate) fn update_dock_goal(
+    state: &mut State,
+    index: usize,
+    state_path: &Path,
+    goal: Option<String>,
+) -> Result<()> {
+    if state.docks[index].goal == goal {
+        return Ok(());
+    }
+    let previous = std::mem::replace(&mut state.docks[index].goal, goal);
+    if let Err(error) = write_dock_agent_guides(&state.docks[index]) {
+        state.docks[index].goal = previous;
+        let cleanup_errors = write_dock_agent_guides(&state.docks[index])
+            .err()
+            .map(|error| format!("could not restore agent guides: {error}"))
+            .into_iter()
+            .collect();
+        return Err(with_cleanup_errors(error, cleanup_errors));
+    }
+    if let Err(error) = save_state(state_path, state) {
+        state.docks[index].goal = previous;
+        let cleanup_errors = write_dock_agent_guides(&state.docks[index])
+            .err()
+            .map(|error| format!("could not restore agent guides: {error}"))
+            .into_iter()
+            .collect();
+        return Err(with_cleanup_errors(error, cleanup_errors));
+    }
+    Ok(())
 }
 pub(crate) fn write_agent_guides(
     root: &Path,
