@@ -188,6 +188,9 @@ pub(crate) struct RepositoryOverview {
     pub(crate) name: String,
     pub(crate) status: String,
     pub(crate) commit: String,
+    pub(crate) base_ref: String,
+    pub(crate) ahead: Option<u64>,
+    pub(crate) behind: Option<u64>,
 }
 
 pub(crate) fn load_state(path: &Path) -> Result<State> {

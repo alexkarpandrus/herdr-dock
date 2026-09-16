@@ -5,7 +5,7 @@ use crate::dock::{
     check_dock_session, ensure_no_live_legacy_workspace, legacy_workspace_is_live, reopen_dock,
     sync_dock_agents,
 };
-use crate::git::optional_git;
+use crate::git::{ahead_behind, optional_git};
 use crate::herdr::{current_herdr_session, herdr, live_workspaces, spawn_child};
 use crate::model::{
     AgentOverview, DockOverview, DockRecord, LiveWorkspace, RepositoryOverview, State, load_state,
@@ -140,6 +140,79 @@ fn dirty_count(dock: &DockOverview) -> usize {
         .iter()
         .filter(|repository| repository.status == "dirty")
         .count()
+}
+
+fn repository_progress(repository: &RepositoryOverview, branch: &str) -> String {
+    if repository.base_ref == branch {
+        return "reused existing branch".into();
+    }
+    match (repository.ahead, repository.behind) {
+        (Some(0), Some(0)) => format!("no branch commits against {}", repository.base_ref),
+        (Some(ahead), Some(0)) => format!("{ahead} ahead of {}", repository.base_ref),
+        (Some(0), Some(behind)) => {
+            format!(
+                "no branch commits · {behind} behind {}",
+                repository.base_ref
+            )
+        }
+        (Some(ahead), Some(behind)) => format!(
+            "{ahead} ahead · {behind} behind {} · diverged",
+            repository.base_ref
+        ),
+        _ => format!("comparison unavailable against {}", repository.base_ref),
+    }
+}
+
+fn dock_health(dock: &DockOverview) -> (String, Color) {
+    if dock.repositories.is_empty() {
+        return ("no repositories".into(), Color::DarkGrey);
+    }
+    let missing = dock
+        .repositories
+        .iter()
+        .filter(|repository| repository.status == "missing")
+        .count();
+    let diverged = dock
+        .repositories
+        .iter()
+        .filter(|repository| {
+            repository.ahead.is_some_and(|ahead| ahead > 0)
+                && repository.behind.is_some_and(|behind| behind > 0)
+        })
+        .count();
+    let behind = dock
+        .repositories
+        .iter()
+        .filter(|repository| repository.behind.is_some_and(|behind| behind > 0))
+        .count();
+    let no_commits = dock
+        .repositories
+        .iter()
+        .filter(|repository| repository.ahead == Some(0))
+        .count();
+    if missing > 0 {
+        (format!("{missing} missing"), Color::Red)
+    } else if diverged > 0 {
+        (format!("{diverged} diverged"), Color::Yellow)
+    } else if behind > 0 {
+        (format!("{behind} behind"), Color::Yellow)
+    } else if no_commits > 0 {
+        (format!("{no_commits} no commits"), Color::Yellow)
+    } else if dock
+        .repositories
+        .iter()
+        .any(|repository| repository.ahead.is_some())
+    {
+        ("branches ahead".into(), Color::Green)
+    } else if dock
+        .repositories
+        .iter()
+        .all(|repository| repository.base_ref == dock.branch)
+    {
+        ("reused branches".into(), Color::DarkGrey)
+    } else {
+        ("comparison unavailable".into(), Color::DarkGrey)
+    }
 }
 
 /// Render the matched docks as a kanban board: one column per lane, one card per dock.
@@ -391,6 +464,15 @@ pub(crate) fn card_lines(dock: &DockOverview, width: usize, selected: bool) -> V
     ));
     summary_row.push(plain("│"));
 
+    let (health, health_color) = dock_health(dock);
+    let health = truncate(&format!("health · {health}"), inner.saturating_sub(1));
+    let mut health_row: Vec<Segment> = vec![plain("│ ")];
+    health_row.push(styled(health_color, &health));
+    health_row.push(plain(
+        " ".repeat(inner.saturating_sub(health.chars().count() + 1)),
+    ));
+    health_row.push(plain("│"));
+
     let branch = truncate(dock.branch.as_str(), inner.saturating_sub(1));
     let mut branch_row: Vec<Segment> = vec![plain("│ ")];
     branch_row.push(plain(&branch));
@@ -404,6 +486,7 @@ pub(crate) fn card_lines(dock: &DockOverview, width: usize, selected: bool) -> V
         status_row,
         root_row,
         summary_row,
+        health_row,
         branch_row,
         vec![plain("└"), plain("─".repeat(inner)), plain("┘")],
     ]
@@ -467,7 +550,11 @@ pub(crate) fn detail_lines(dock: &DockOverview) -> Vec<Vec<Segment>> {
             plain(format!("  {}", repository.name)),
             plain(" ["),
             status_segment(&repository.status),
-            plain(format!("] · {}", repository.commit)),
+            plain(format!(
+                "] · {} · {}",
+                repository_progress(repository, &dock.branch),
+                repository.commit
+            )),
         ]);
     }
     lines
@@ -1063,7 +1150,9 @@ pub(crate) fn build_overview(
                             None => "unavailable".into(),
                         }
                     };
-                    let commit = if archived {
+                    let counts =
+                        ahead_behind(&repository.source, &record.branch, &repository.base_ref);
+                    let commit = if archived || !repository.worktree.exists() {
                         optional_git(
                             &repository.source,
                             ["log", "-1", "--pretty=%h %s", record.branch.as_str()],
@@ -1076,6 +1165,9 @@ pub(crate) fn build_overview(
                         name: repository.name.clone(),
                         status,
                         commit,
+                        base_ref: repository.base_ref.clone(),
+                        ahead: counts.map(|(ahead, _)| ahead),
+                        behind: counts.map(|(_, behind)| behind),
                     }
                 })
                 .collect();

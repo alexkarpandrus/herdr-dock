@@ -84,6 +84,16 @@ pub(crate) fn optional_git<const N: usize>(
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().into())
 }
+
+pub(crate) fn ahead_behind(repository: &Path, branch: &str, base_ref: &str) -> Option<(u64, u64)> {
+    if branch == base_ref {
+        return None;
+    }
+    let range = format!("{branch}...{base_ref}");
+    let counts = optional_git(repository, ["rev-list", "--left-right", "--count", &range])?;
+    let mut counts = counts.split_whitespace();
+    Some((counts.next()?.parse().ok()?, counts.next()?.parse().ok()?))
+}
 pub(crate) fn checked(command: &mut Command) -> Result<String> {
     let description = format!("{command:?}");
     let Output {

@@ -393,6 +393,7 @@ mod tests {
         let card = display_text(card_lines(&overview[0], 34, false));
         assert!(card.contains("root · codex · done"));
         assert!(card.contains("1 child"));
+        assert!(card.contains("health · no repositories"));
         let detail = display_text(detail_lines(&overview[0]));
         assert!(detail.contains("root · reviewer"));
         assert!(detail.contains("└─ api-child"));
@@ -633,6 +634,12 @@ mod tests {
                 .filter(|repository| repository.status == "dirty")
                 .count(),
             1
+        );
+        assert!(
+            overview[0]
+                .repositories
+                .iter()
+                .all(|repository| { repository.ahead == Some(0) && repository.behind == Some(0) })
         );
 
         let error =
